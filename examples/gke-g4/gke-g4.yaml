@@ -29,20 +29,36 @@ vars:
   zone:
 
   # The VM shape. See allowed values here: https://cloud.google.com/compute/docs/gpus#rtx-6000-gpus
-  machine_type:
+  # Allowed: g4-standard-48 | g4-standard-96 | g4-standard-192 | g4-standard-384
+  # (num_gpus must match: 1 | 2 | 4 | 8).
+  compute_machine_type: g4-standard-48
 
   # Number of GPUS in the VM. Can be found here: https://cloud.google.com/compute/docs/gpus#rtx-6000-gpus
-  num_gpus:
+  num_gpus: 1
 
   # The number of nodes to be created.
-  static_node_count:
+  static_node_count: 1
 
   # Cidr block containing the IP of the machine calling terraform.
   # The following line must be updated for this example to work.
   authorized_cidr:
 
+  # Consumption model variables
+  spot: false
+  reservation_affinity: {consume_reservation_type: "NO_RESERVATION", specific_reservations: []}
+  enable_flex_start: false
+  auto_repair: true
+  enable_queued_provisioning: false
+  autoscaling_total_min_nodes: 0
+  placement_policy: {type: null, name: null}
+  kueue_configuration_path: $(null)
+
   system_node_pool_disk_size_gb: 100
   version_prefix: "1.35."
+
+  # Optional overrides (defaults shown)
+  # Machine type for the GKE system node pool.
+  system_node_pool_machine_type: n2d-standard-16
 
 deployment_groups:
 - group: primary
@@ -118,7 +134,7 @@ deployment_groups:
     source: modules/scheduler/gke-cluster
     use: [gke-g4-net-0, workload_service_account]
     settings:
-      system_node_pool_machine_type: "e2-standard-16"
+      system_node_pool_machine_type: $(vars.system_node_pool_machine_type)
       system_node_pool_disk_size_gb: $(vars.system_node_pool_disk_size_gb)
       system_node_pool_taints: []
       enable_dcgm_monitoring: true
@@ -134,7 +150,6 @@ deployment_groups:
       release_channel: REGULAR
       maintenance_exclusions:
       - name: no-minor-or-node-upgrades-indefinite
-        start_time: "2025-12-01T00:00:00Z"
         exclusion_scope: NO_MINOR_OR_NODE_UPGRADES
         exclusion_end_time_behavior: UNTIL_END_OF_SUPPORT
     outputs: [instructions]
@@ -143,16 +158,21 @@ deployment_groups:
     source: modules/compute/gke-node-pool
     use: [g4-cluster, node_pool_service_account]
     settings:
-      machine_type: $(vars.machine_type)
+      machine_type: $(vars.compute_machine_type)
       auto_upgrade: true
       zones: [$(vars.zone)]
       static_node_count: $(vars.static_node_count)
+      spot: $(vars.spot)
+      reservation_affinity: $(vars.reservation_affinity)
+      enable_flex_start: $(vars.enable_flex_start)
+      auto_repair: "$(vars.enable_flex_start ? false : vars.auto_repair)"
+      enable_queued_provisioning: $(vars.enable_queued_provisioning)
+      autoscaling_total_min_nodes: $(vars.autoscaling_total_min_nodes)
       enable_numa_aware_scheduling: true
       guest_accelerator:
       - type: nvidia-rtx-pro-6000
         count: $(vars.num_gpus)
-        gpu_driver_installation_config:
-          gpu_driver_version: LATEST # TODO: Move to a fixed GPU driver version.
+      placement_policy: $(vars.placement_policy)
       additional_networks: $(gke-g4-net-1.instance_additional_networks)
     outputs: [instructions]
 
@@ -163,7 +183,9 @@ deployment_groups:
     settings:
       kueue:
         install: true
-        wait: true
+        config_path: $(vars.kueue_configuration_path)
+        config_template_vars:
+          num_gpus: $(g4-pool.static_gpu_count)
       jobset:
         install: true
 
@@ -174,7 +196,7 @@ deployment_groups:
       image: nvidia/cuda:13.0.0-base-ubuntu24.04
       command:
       - nvidia-smi
-      node_count: $(vars.static_node_count)
+      node_count: "$(vars.static_node_count != null ? vars.static_node_count : 2)"
       name: run-nvidia-smi
       k8s_service_account_name: workload-identity-k8s-sa
     outputs: [instructions]

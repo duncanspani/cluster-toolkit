@@ -6,7 +6,7 @@ This module creates a Kubernetes secret in a specified namespace on a given GKE 
 
 ```yaml
 - id: k8s_secret
-  source: ./modules/security/kubernetes-secret
+  source: modules/security/kubernetes-secret
   settings:
     cluster_id: "projects/my-project/locations/us-central1/clusters/my-cluster"
     namespace: "default"
@@ -37,7 +37,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 3.83 |
 | <a name="requirement_kubernetes"></a> [kubernetes](#requirement\_kubernetes) | >= 2.10 |
 

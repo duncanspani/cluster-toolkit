@@ -26,6 +26,24 @@ repos:
     - --hook-config=--retry-once-with-cleanup=true
 - repo: local
   hooks:
+  - id: validate-kueue-tests
+    name: validate-kueue-tests
+    entry: python3 tools/cloud-build/daily-tests/validate_kueue_tests.py
+    language: python
+    language_version: python3
+    additional_dependencies: ['ruamel.yaml']
+    files: 'tools/cloud-build/daily-tests/builds/.*\.yaml'
+    pass_filenames: false
+    require_serial: true
+  - id: generate-kueue-locks
+    name: generate-kueue-locks
+    entry: python3 tools/cloud-build/provision/generate_kueue_locks.py
+    language: python
+    language_version: python3
+    additional_dependencies: ['ruamel.yaml']
+    files: 'tools/cloud-build/daily-tests/builds/.*\.yaml'
+    pass_filenames: false
+    require_serial: true
   - id: terraform-readme
     name: terraform-readme
     entry: tools/autodoc/terraform_docs.sh
@@ -74,14 +92,30 @@ repos:
     files: 'tools/cloud-build/daily-tests/builds/.*\.yaml'
     pass_filenames: false
     require_serial: true
-  - id: validate-daily-test-builds
-    name: validate-daily-test-builds
-    entry: tools/cloud-build/daily-tests/validate_daily_test_builds.py
+  - id: skills-lint
+    name: skills-lint
+    entry: python3 tools/run_eval.py --lint-only --all
     language: python
     language_version: python3
-    additional_dependencies: ['pyyaml']
-    files: 'tools/cloud-build/daily-tests/builds/.*\.(yaml|yml)'
-    pass_filenames: true
+    additional_dependencies: ['pyyaml>=6.0.1']
+    files: '^(skills/.*|tools/run_eval\.py|tools/tests/test_run_eval\.py)$'
+    pass_filenames: false
+    require_serial: true
+  - id: catalog-gen
+    name: catalog-gen
+    entry: go run ./tools/catalog-gen
+    language: system
+    files: '^(examples/.*\.(yaml|md)|community/examples/.*\.(yaml|md)|modules/.*\.(tf|hcl|yaml)|community/modules/.*\.(tf|hcl|yaml)|pkg/catalog/.*\.go|tools/catalog-gen/.*\.go|skills/cluster-blueprint-assistant/references/catalog\.yaml|llms\.txt|llms-full\.txt)$'
+    pass_filenames: false
+    require_serial: true
+  - id: validate-readme-snippets
+    name: validate-readme-snippets
+    entry: python3 tools/validate_readme_snippets.py
+    language: python
+    language_version: python3
+    additional_dependencies: ['pyyaml>=6.0.1']
+    files: '^((README|AGENTS|CONTRIBUTING)\.md|llms(-full)?\.txt|(docs|examples|modules|community|pkg|cmd|tools|skills)/.*\.(md|tf|pkr\.hcl)|tools/validate_configs/os_compatibility_tests/.*\.yaml|tools/validate_readme_snippets\.py)$'
+    pass_filenames: false
     require_serial: true
   - id: pytest-check
     name: pytest-check
@@ -100,7 +134,7 @@ repos:
     - requests
     - httplib2
     - more-executors
-    - addict
+
     - google-cloud-tpu
     types: [python]
     pass_filenames: false
@@ -122,9 +156,38 @@ repos:
     - pytest
     - pytest-unordered
     - more-executors
-    - addict
+
     - google-cloud-tpu
     types: [python]
+    pass_filenames: false
+
+  - id: go-vet-community-health-check
+    name: go-vet-community-health-check
+    entry: bash -c 'cd community/cluster-health-check && go vet ./...'
+    language: system
+    files: ^community/cluster-health-check/.*\.go$
+    pass_filenames: false
+
+  - id: go-unit-tests-community-health-check
+    name: go-unit-tests-community-health-check
+    entry: bash -c 'unset $(git rev-parse --local-env-vars) && cd community/cluster-health-check && go test -timeout 30s -short -v ./...'
+    language: system
+    files: ^community/cluster-health-check/.*\.go$
+    pass_filenames: false
+
+  - id: go-unit-tests
+    name: go-unit-tests
+    entry: bash -c 'unset $(git rev-parse --local-env-vars) && go test -tags=unit -timeout 30s -short -v $(go list ./... | grep -v /vendor/)'
+    language: system
+    files: \.go$
+    exclude: ^community/cluster-health-check/
+    pass_filenames: false
+
+  - id: go-mod-tidy-community-health-check
+    name: go-mod-tidy-community-health-check
+    entry: bash -c 'cd community/cluster-health-check && go mod tidy && git diff --exit-code go.mod go.sum'
+    language: system
+    files: ^community/cluster-health-check/(go\.mod|go\.sum|.*\.go)$
     pass_filenames: false
 
 - repo: https://github.com/dnephin/pre-commit-golang
@@ -132,10 +195,10 @@ repos:
   hooks:
   - id: go-fmt
   - id: go-vet
+    exclude: ^community/cluster-health-check/
   - id: go-imports
   - id: go-cyclo
     args: [-over=13]
-  - id: go-unit-tests
   - id: go-mod-tidy
 # Disabled temporarily due to https://github.com/go-critic/go-critic/issues/1388
 # - repo: https://github.com/tekwizely/pre-commit-golang
@@ -143,9 +206,10 @@ repos:
 #   hooks:
 #   - id: go-critic
 - repo: https://github.com/golangci/golangci-lint
-  rev: v1.63.4
+  rev: v2.13.1
   hooks:
   - id: golangci-lint
+    entry: golangci-lint run --new-from-rev HEAD
 - repo: https://github.com/adrienverge/yamllint
   rev: v1.34.0
   hooks:
@@ -163,7 +227,7 @@ repos:
     # MD041 - First line in file should be a top level header
     # MD046 - Code block style
     # MD024 - Multiple headings cannot contain the same content.
-    exclude: GEMINI.md
+    exclude: (AGENTS\.md|CLAUDE\.md|GEMINI\.md|skills\/.*)
     args: [--disable-rules, "MD013,MD022,MD033,MD034,MD041,MD046,MD024", scan]
 - repo: https://github.com/jumanjihouse/pre-commit-hooks
   rev: "3.0.0"

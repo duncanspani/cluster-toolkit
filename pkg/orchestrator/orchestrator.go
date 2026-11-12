@@ -24,14 +24,21 @@ type PathwaysJobDefinition struct {
 
 	// Pathways specific configurations
 	Headless         bool   // Default: false
+	DeploySPS        bool   // Default: false
+	RunSPSWorkload   string // SPS instance (JobSet name or endpoint) to run the workload on
 	GCSLocation      string // Required for Pathways jobs.
 	ElasticSlices    int    // Default: 0
-	MaxSliceRestarts int    // Default: 1
+	MaxSliceRestarts int    // Default: 0 (4000 for ElasticSlices > 0 or Headless; 1000000 for DeploySPS)
 
 	// Custom Arguments for Pathways components
 	ProxyArgs  string // Default: ""
 	ServerArgs string // Default: ""
 	WorkerArgs string // Default: ""
+
+	// Custom Environment Variables for Pathways components
+	ProxyEnv  map[string]string
+	ServerEnv map[string]string
+	WorkerEnv map[string]string
 
 	// Pathways-specific sidecars
 	ColocatedPythonSidecarImage string // Default: ""
@@ -59,6 +66,7 @@ type JobDefinition struct {
 	ProjectID       string
 	ClusterName     string
 	ClusterLocation string
+	GKENamespace    string
 
 	WorkloadName                  string
 	KueueQueueName                string
@@ -82,12 +90,32 @@ type JobDefinition struct {
 	UseParallelContainers bool
 	Timeout               string
 	PriorityClassName     string
+	GKENAPProvisioning    string
+	GKENAPReservation     string
+
+	// ImagePullSecretsSpecified reports that ImagePullSecrets was given explicitly, possibly empty, and must be
+	// used as is instead of discovering secrets.
+	ImagePullSecretsSpecified bool
 
 	// Pathways-specific fields
 	IsPathwaysJob bool
 	Pathways      PathwaysJobDefinition // Embedded struct for Pathways-specific args
 
-	Volumes []VolumeDefinition
+	// Multi-Tier Checkpointing (MTC)
+	GKEMTCEnabled          bool
+	GKEMTCRamdiskDirectory string
+
+	MLDiagnosticsEnabled bool
+	MLDiagnosticsImage   string
+	// MLDiagnosticsImageSpecified reports that MLDiagnosticsImage was given explicitly, possibly empty; an explicit
+	// empty value ignores GCLUSTER_TELEMETRY_IMAGE (GKE then uses the managed webhook).
+	MLDiagnosticsImageSpecified bool
+	MLDiagnosticsTelemetryPort  int
+
+	GkeCustomTemplatesPath string
+
+	RawMounts []string
+	Env       map[string]string
 
 	Verbose bool
 }
@@ -103,6 +131,7 @@ type ListOptions struct {
 	ProjectID       string
 	ClusterName     string
 	ClusterLocation string
+	GKENamespace    string
 	// Filters
 	Status       string
 	NameContains string
@@ -112,20 +141,39 @@ type CancelOptions struct {
 	ProjectID       string
 	ClusterName     string
 	ClusterLocation string
+	GKENamespace    string
 }
 
 type LogsOptions struct {
 	ProjectID       string
 	ClusterName     string
 	ClusterLocation string
+	GKENamespace    string
 	Follow          bool
+	MainOnly        *bool
 }
 
+// InspectOptions defines configuration for GKE cluster diagnostic sweeps.
+type InspectOptions struct {
+	ProjectID       string
+	ClusterName     string
+	ClusterLocation string
+	GKENamespace    string
+	WorkloadName    string
+	OutputPath      string
+	Show            bool
+	Filter          string // component filter (e.g., "pathways-sps")
+}
+
+// JobOrchestrator defines the interface to interact with job orchestrators like GKE.
 type JobOrchestrator interface {
+	// Initialize fetches cluster metadata and resolves the cluster location.
+	Initialize(clusterName, location, projectID string) (resolvedLocation string, err error)
 	SubmitJob(job JobDefinition) error
 	ListJobs(opts ListOptions) ([]JobStatus, error)
 	CancelJob(name string, opts CancelOptions) error
 	GetJobLogs(name string, opts LogsOptions) (string, error)
+	InspectCluster(opts InspectOptions) error
 }
 
 type ClusterStatus struct {

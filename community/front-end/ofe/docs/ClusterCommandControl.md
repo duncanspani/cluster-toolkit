@@ -41,7 +41,7 @@ Each command will have additional data in the Message Data, specific to that com
 * `SYNC` - Command to cluster to synchronize with the Frontend, including updating Log Files, and potentially other activities in the future (such as setting user permissions).
 * `SPACK_INSTALL` - Install a Spack package
 * `RUN_JOB` - Submit a job on behalf of a user to SLURM
-* `REGISTER_USER_GCS` - Begin the process to register a user's GCS credentials with `gsutil`.
+* `REGISTER_USER_GCS` - Begin the process to register a user's GCS credentials via an interactive `gcloud auth login` flow (credentials are shared with `gcloud storage`).
 
 ### Cluster C2 Daemon
 
@@ -51,7 +51,7 @@ During startup of a cluster, a Daemon is installed which creates a Streaming Pul
 
 The C2 topic is created at deployment time, as well as the subscription for the Frontend.  Topic creation permission is then no longer required by the Service Accounts of the Frontend or the Clusters.
 
-When a Cluster is created, a new Service Account is created for that Cluster.  This Service Account is then granted `pubsub.subscriber` permissions to the C2 Topic, and `pubsub.publisher` permissions to that cluster's own Subscription.  The Service Accounts for the clusters are created without any Google PubSub IAM permissions, so these policy bindings on the topic and subscription are the only PubSub IAM permissions granted to the cluster's service accounts.
+When a Cluster is created, a new Service Account is created for that Cluster. This Service Account is granted `pubsub.publisher` permissions on the C2 Topic and `pubsub.subscriber` permissions on that cluster's own Subscription (in addition to the project-level roles defined in the cluster blueprint template, such as `pubsub.admin` and `resourcemanager.projectIamAdmin`).
 
 Sadly, the Frontend's Service Account must have either the role of `pubsub.admin` or a custom role, set at the project level.  This is because creating subscriptions and setting IAM Policy Bindings are actions done at the project level, rather than attached to the topic.
 

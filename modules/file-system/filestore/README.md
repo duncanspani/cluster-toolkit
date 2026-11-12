@@ -38,11 +38,11 @@ Usage can be enabled in a blueprint with, for example:
 At the time of writing, Filestore supports 5 [tiers of service][tiers] that are
 specified in the Toolkit using the following names:
 
-- Basic HDD: "BASIC\_HDD" ([preferred][tierapi]) or "STANDARD" (deprecated)
-- Basic SSD: "BASIC\_SSD" ([preferred][tierapi]) or "PREMIUM" (deprecated)
-- Zonal: "ZONAL"
-- Enterprise: "ENTERPRISE"
-- Regional: "REGIONAL"
+- Basic HDD: `"BASIC_HDD"` (legacy `"STANDARD"` is rejected by validation)
+- Basic SSD: `"BASIC_SSD"` (legacy `"PREMIUM"` is rejected by validation)
+- Zonal: `"ZONAL"` (or legacy `"HIGH_SCALE_SSD"`)
+- Enterprise: `"ENTERPRISE"`
+- Regional: `"REGIONAL"`
 
 [tierapi]: https://cloud.google.com/filestore/docs/reference/rest/v1beta1/Tier
 
@@ -190,7 +190,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 6.4 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
 
@@ -222,8 +222,11 @@ No modules.
 | <a name="input_description"></a> [description](#input\_description) | A description of the filestore instance. | `string` | `""` | no |
 | <a name="input_filestore_share_name"></a> [filestore\_share\_name](#input\_filestore\_share\_name) | Name of the file system share on the instance. | `string` | `"nfsshare"` | no |
 | <a name="input_filestore_tier"></a> [filestore\_tier](#input\_filestore\_tier) | The service tier of the instance. | `string` | `"BASIC_SSD"` | no |
+| <a name="input_kms_key_name"></a> [kms\_key\_name](#input\_kms\_key\_name) | The name (full resource name) of a Cloud KMS CryptoKey used to encrypt<br/>the Filestore instance (CMEK). Only supported for ZONAL, REGIONAL, and<br/>ENTERPRISE tiers. The Filestore service agent must hold<br/>roles/cloudkms.cryptoKeyEncrypterDecrypter on the key, and the key<br/>location must match the instance location. | `string` | `null` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels to add to the filestore instance. Key-value pairs. | `map(string)` | n/a | yes |
 | <a name="input_local_mount"></a> [local\_mount](#input\_local\_mount) | Mountpoint for this filestore instance. Note: If set to the same as the `filestore_share_name`, it will trigger a known Slurm bug ([troubleshooting](../../../docs/slurm-troubleshooting.md)). | `string` | `"/shared"` | no |
+| <a name="input_local_mount_owner"></a> [local\_mount\_owner](#input\_local\_mount\_owner) | Local mount owner, string in format <user>:<group>. | `string` | `""` | no |
+| <a name="input_local_mount_permissions"></a> [local\_mount\_permissions](#input\_local\_mount\_permissions) | Local mount permissions, specified as mode according to chmod(2). | `string` | `""` | no |
 | <a name="input_mount_options"></a> [mount\_options](#input\_mount\_options) | NFS mount options to mount file system. | `string` | `"defaults,_netdev"` | no |
 | <a name="input_name"></a> [name](#input\_name) | The resource name of the instance. | `string` | `null` | no |
 | <a name="input_network_id"></a> [network\_id](#input\_network\_id) | The ID of the GCE VPC network to which the instance is connected given in the format:<br/>`projects/<project_id>/global/networks/<network_name>`" | `string` | n/a | yes |

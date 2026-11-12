@@ -92,27 +92,36 @@ variable "min_master_version" {
 }
 
 variable "version_prefix" {
-  description = "If provided, Terraform will only return versions that match the string prefix. For example, `1.31.` will match all `1.31` series releases. Since this is just a string match, it's recommended that you append a `.` after minor versions to ensure that prefixes such as `1.3` don't match versions like `1.30.1-gke.10` accidentally."
+  description = "If provided, Terraform will only return versions that match the string prefix. For example, `1.35.` will match all `1.35` series releases. Since this is just a string match, it's recommended that you append a `.` after minor versions to ensure that prefixes such as `1.3` don't match versions like `1.30.1-gke.10` accidentally."
   type        = string
-  default     = "1.31."
+  default     = "1.35."
 }
 
 variable "maintenance_start_time" {
-  description = "Start time for daily maintenance operations. Specified in GMT with `HH:MM` format."
+  description = "Start time for daily maintenance operations in GMT (HH:MM format). If set to null, a daily maintenance window restriction is not configured, meaning GKE can schedule maintenance at any time."
   type        = string
   default     = "09:00"
+  nullable    = true
 }
 
 variable "maintenance_exclusions" {
   description = "List of maintenance exclusions. A cluster can have up to three. For each exclusion, exactly one of `end_time` or `exclusion_end_time_behavior` must be specified. If `exclusion_end_time_behavior` is used, its value must be `UNTIL_END_OF_SUPPORT`."
   type = list(object({
     name                        = string
-    start_time                  = string
+    start_time                  = optional(string)
     end_time                    = optional(string)
     exclusion_scope             = string
     exclusion_end_time_behavior = optional(string)
   }))
   default = []
+  validation {
+    condition = alltrue([
+      for x in var.maintenance_exclusions : (
+        x.end_time == null || (x.start_time != null && try(length(trimspace(x.start_time)) > 0, false))
+      )
+    ])
+    error_message = "For fixed-window exclusions (where 'end_time' is specified), 'start_time' must also be provided and cannot be empty."
+  }
   validation {
     condition = alltrue([
       for x in var.maintenance_exclusions : (
@@ -191,12 +200,18 @@ variable "enable_gcsfuse_csi" {
   default     = false
 }
 
-
 variable "enable_persistent_disk_csi" {
   description = "The status of the Google Compute Engine Persistent Disk Container Storage Interface (CSI) driver addon, which allows the usage of a PD as volumes."
   type        = bool
   default     = true
 }
+
+variable "enable_multi_tier_checkpointing" {
+  description = "The status of the High Scale Checkpointing addon (Multi-Tier Checkpointing). This feature allows GKE to manage local SSD checkpoints and background uploads to Cloud Storage for highly resilient machine learning workloads."
+  type        = bool
+  default     = false
+}
+
 
 variable "enable_parallelstore_csi" {
   description = "The status of the Google Compute Engine Parallelstore Container Storage Interface (CSI) driver addon, which allows the usage of a parallelstore as volumes."
@@ -220,6 +235,24 @@ variable "enable_dcgm_monitoring" {
   description = "Enable GKE to collect DCGM metrics"
   type        = bool
   default     = true
+}
+
+variable "monitoring_components" {
+  description = "List of GKE monitoring components to enable. If empty, GKE monitoring is disabled."
+  type        = list(string)
+  nullable    = false
+  default = [
+    "SYSTEM_COMPONENTS",
+    "POD",
+    "DAEMONSET",
+    "DEPLOYMENT",
+    "STATEFULSET",
+    "STORAGE",
+    "HPA",
+    "CADVISOR",
+    "KUBELET",
+    "JOBSET"
+  ]
 }
 
 variable "enable_node_local_dns_cache" {
@@ -254,14 +287,14 @@ variable "system_node_pool_node_count" {
   })
   default = {
     total_min_nodes = 2
-    total_max_nodes = 10
+    total_max_nodes = 150
   }
 }
 
 variable "system_node_pool_machine_type" {
-  description = "Machine type for the system node pool."
+  description = "Machine type for the system node pool. Defaults to 'n2d-standard-4' if confidential nodes are enabled. Otherwise, it defaults to 'n4-standard-4' if available in the target region/zones, falling back to 'n2d-standard-4'."
   type        = string
-  default     = "e2-standard-4"
+  default     = null
 }
 
 variable "system_node_pool_disk_size_gb" {
@@ -299,7 +332,7 @@ variable "system_node_pool_kubernetes_labels" {
   default     = null
 }
 variable "system_node_pool_image_type" {
-  description = "The default image type used by NAP once a new node pool is being created. Use either COS_CONTAINERD or UBUNTU_CONTAINERD."
+  description = "The OS image type used for the system node pool nodes. Use either COS_CONTAINERD or UBUNTU_CONTAINERD."
   type        = string
   default     = "COS_CONTAINERD"
 }
@@ -328,9 +361,17 @@ variable "enable_private_endpoint" {
 }
 
 variable "master_ipv4_cidr_block" {
-  description = "(Beta) The IP range in CIDR notation to use for the hosted master network."
+  description = "(Beta) The IP range in CIDR notation (size must be /28) to use for the hosted master network. If null (default), GKE uses Private Service Connect (PSC) and reserves the control plane endpoint IP from the cluster's primary subnetwork (`subnetwork_self_link`)."
   type        = string
-  default     = "172.16.0.32/28"
+  default     = null
+  validation {
+    condition = var.master_ipv4_cidr_block == null || try(
+      cidrnetmask(var.master_ipv4_cidr_block) == "255.255.255.240" &&
+      cidrsubnet(var.master_ipv4_cidr_block, 0, 0) == var.master_ipv4_cidr_block,
+      false
+    )
+    error_message = "master_ipv4_cidr_block must be null or a valid IPv4 /28 CIDR block (e.g. 1.2.3.0/28)."
+  }
 }
 
 variable "enable_master_global_access" {
@@ -352,6 +393,13 @@ variable "master_authorized_networks" {
     display_name = string
   }))
   default = []
+
+  validation {
+    condition     = var.master_authorized_networks == null ? true : can([for net in var.master_authorized_networks : cidrhost(net.cidr_block, 0)])
+    error_message = "Validation failed due to invalid CIDR IP address in 'master_authorized_networks.cidr_block'. All values must be in CIDR format (e.g. 1.2.3.4/32)."
+  }
+
+
 }
 
 variable "service_account_email" {
@@ -361,7 +409,7 @@ variable "service_account_email" {
 }
 
 variable "service_account_scopes" {
-  description = "Scopes to to use with the system node pool."
+  description = "Scopes to use with the system node pool."
   type        = set(string)
   default     = ["https://www.googleapis.com/auth/cloud-platform"]
 }
@@ -408,15 +456,33 @@ variable "labels" {
 }
 
 variable "timeout_create" {
-  description = "Timeout for creating a node pool"
+  description = "Timeout for creating a cluster and its node pools (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (90m for cluster, 2h for node pools)."
   type        = string
   default     = null
+  validation {
+    condition     = var.timeout_create == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_create)) && !can(regex("^(0+(s|m|h))+$", var.timeout_create)))
+    error_message = "timeout_create must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
 }
 
 variable "timeout_update" {
-  description = "Timeout for updating a node pool"
+  description = "Timeout for updating a cluster and its node pools (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (90m for cluster, 2h for node pools)."
   type        = string
   default     = null
+  validation {
+    condition     = var.timeout_update == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_update)) && !can(regex("^(0+(s|m|h))+$", var.timeout_update)))
+    error_message = "timeout_update must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
+}
+
+variable "timeout_delete" {
+  description = "Timeout for deleting a cluster and its node pools (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (90m for cluster, 2h for node pools)."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.timeout_delete == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_delete)) && !can(regex("^(0+(s|m|h))+$", var.timeout_delete)))
+    error_message = "timeout_delete must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
 }
 
 # Deprecated
@@ -466,7 +532,7 @@ variable "additional_networks" {
 }
 
 variable "cluster_reference_type" {
-  description = "How the google_container_node_pool.system_node_pools refers to the cluster. Possible values are: {SELF_LINK, NAME}"
+  description = "How system node pools refer to the cluster. Possible values are: {SELF_LINK, NAME}. Defaults to SELF_LINK to prevent destructive replacement of existing node pools (since cluster is immutable). For new clusters deployed with Google Provider >= 8.0, set this to 'NAME' to avoid provider URL path concatenation errors (HTTP 404)."
   default     = "SELF_LINK"
   type        = string
   nullable    = false
@@ -562,6 +628,12 @@ variable "enable_external_dns_endpoint" {
   default     = false
 }
 
+variable "enable_gateway_api" {
+  description = "Enable the GKE Standard Gateway API channel and HttpLoadBalancing addon without installing Inference Extension CRDs. Inference Gateway also enables these prerequisites independently of this setting."
+  type        = bool
+  default     = false
+}
+
 variable "enable_inference_gateway" {
   description = "If true, enables GKE features required for Inference Gateway, including the HttpLoadBalancing addon, and installs required CRDs."
   type        = bool
@@ -601,9 +673,8 @@ variable "enable_slice_controller" {
 
 variable "cluster_autoscaling" {
   description = <<EOT
-  GKE Node Auto-Provisioning (NAP) and Cluster Autoscaling configuration.
+  GKE Node Auto-Provisioning (NAP) and Cluster Autoscaling configuration. Passing a non-null object enables NAP; leave null (default) to disable.
 
-  enabled:               Enable/disable GKE Cluster autoscaling and auto-provisioning.
   service_account_email: The service account tied to node-provisioning. Defaults to the deployment service account.
   oauth_scopes:          Scopes assigned to nodes provisioned by NAP.
   autoprovisioning_disk_size_gb: The disk size of auto-provisioned nodes (GB). Default 100.
@@ -650,4 +721,52 @@ variable "machine_mappings_json" {
   description = "Injected JSON string containing machine mappings"
   type        = string
   default     = "{}"
+}
+
+variable "enable_ml_diagnostics" {
+  description = "Enables ML Diagnostics on the GKE cluster."
+  type        = bool
+  default     = false
+}
+
+variable "network_policy" {
+  description = "Configuration for the network policy addon. Enabling network policy for clusters with GKE Dataplane V2 (ADVANCED_DATAPATH) is not supported; GKE Dataplane V2 automatically manages network policy enforcement."
+  type = object({
+    enabled  = bool
+    provider = optional(string, "PROVIDER_UNSPECIFIED")
+  })
+  default = {
+    enabled  = false
+    provider = "PROVIDER_UNSPECIFIED"
+  }
+}
+
+variable "enable_fqdn_network_policy" {
+  description = "Enable FQDN Network Policy on the cluster. This feature requires GKE Dataplane V2 to be enabled."
+  type        = bool
+  default     = false
+}
+
+variable "enable_confidential_nodes" {
+  description = "Enable Confidential Nodes at the cluster level. All nodes in the cluster will run on Confidential VMs."
+  type        = bool
+  default     = false
+}
+
+variable "confidential_instance_type" {
+  description = "The type of technology used by the confidential nodes (e.g., SEV, SEV_SNP, TDX). Leave null for default."
+  type        = string
+  default     = null
+}
+
+variable "enable_confidential_storage" {
+  description = "Enable Confidential Storage on the cluster nodes. Node boot disks will be encrypted using keys protected by the Confidential VM."
+  type        = bool
+  default     = false
+}
+
+variable "boot_disk_kms_key" {
+  description = "The Customer Managed Encryption Key (CMEK) used to encrypt the boot disks of the GKE nodes. Required if enable_confidential_storage is true."
+  type        = string
+  default     = null
 }

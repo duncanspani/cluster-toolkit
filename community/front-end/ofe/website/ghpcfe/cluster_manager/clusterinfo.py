@@ -28,6 +28,7 @@ import os
 import re
 
 from django.template import engines as template_engines
+from django.utils import timezone
 from google.api_core.exceptions import PermissionDenied as GCPPermissionDenied
 from website.settings import SITE_NAME
 
@@ -94,15 +95,17 @@ class ClusterInfo:
         self._prepare_bootstrap_gcs()
 
     def start_cluster(self, credentials):
-        self.cluster.cloud_state = "nm"
+        # A Retry of a cluster whose earlier apply succeeded must not forget
+        # that its resources exist.
+        if self.cluster.cloud_state != "m":
+            self.cluster.cloud_state = "nm"
         self.cluster.status = "c"
         self.cluster.save()
 
-        self._create_cluster_dir()
-        self._set_credentials(credentials)
-        self.update()
-
         try:
+            self._create_cluster_dir()
+            self._set_credentials(credentials)
+            self.update()
             self._run_ghpc()
             self._initialize_terraform()
             self._apply_terraform()
@@ -112,15 +115,17 @@ class ClusterInfo:
             self.cluster.save()
 
         # Not a lot we can do if terraform fails, it's on the admin user to
-        # investigate and fix the errors shown in the log
+        # investigate and fix the errors shown in the log.
+        # cloud_state is left alone: it becomes "m" as soon as the apply
+        # succeeds, so a later failure keeps the cluster managed.
         except Exception:  # pylint: disable=broad-except
             self.cluster.status = "e"
-            self.cluster.cloud_state = "nm"
             self.cluster.save()
             raise
 
     def reconfigure_cluster(self):
         try:
+            self.update()
             self._run_ghpc()
             self._initialize_terraform()
             self._apply_terraform()
@@ -129,10 +134,11 @@ class ClusterInfo:
             self.cluster.save()
 
         # Not a lot we can do if terraform fails, it's on the admin user to
-        # investigate and fix the errors shown in the log
+        # investigate and fix the errors shown in the log.
+        # The cluster was running before this reconfigure and still exists,
+        # so it stays managed.
         except Exception:  # pylint: disable=broad-except
             self.cluster.status = "e"
-            self.cluster.cloud_state = "nm"
             self.cluster.save()
             raise
 
@@ -264,6 +270,16 @@ class ClusterInfo:
         for part in self.cluster.partitions.all():
             disk_range = list(range(part.additional_disk_count))
             exclusive = 'True' if part.enable_placement or not part.enable_node_reuse else 'False'
+            # The nodeset module defaults on_host_maintenance to TERMINATE, which
+            # GCP rejects for non-preemptible e2 instances. Emit MIGRATE for e2
+            # partitions instead. GPU nodes must keep TERMINATE (GPUs cannot
+            # live-migrate). The partition form (forms.py ClusterPartitionForm.clean)
+            # already refuses enable_placement for e2, so MIGRATE here can never
+            # silently deactivate a placement group.
+            machine_family = part.machine_type.split("-")[0]
+            use_migrate_maintenance = (
+                machine_family == "e2" and part.GPU_per_node == 0
+            )
             context = {
                 'part': part,
                 'part_id': f"partition_{part.id}",
@@ -271,6 +287,7 @@ class ClusterInfo:
                 'cluster': self.cluster,
                 'disk_range': disk_range,
                 'exclusive': exclusive,
+                'use_migrate_maintenance': use_migrate_maintenance,
                 "startup_bucket": self.config["server"]["gcs_bucket"],
             }
             rendered_yaml = template.render(context)
@@ -321,6 +338,10 @@ class ClusterInfo:
                 "login_uses": self._yaml_refs_to_uses(filesystems_refs, indent_level=2),
                 "controller_sa": "sa",
                 "startup_bucket": self.config["server"]["gcs_bucket"],
+                "state_bucket": utils.get_terraform_state_bucket(),
+                "state_prefix": utils.terraform_state_prefix(
+                    "cluster", self.cluster.id
+                ),
             }
             rendered_yaml = template.render(context)
 
@@ -345,6 +366,7 @@ class ClusterInfo:
 
         except Exception as e:
             logger.exception(f"Exception happened creating blueprint for cluster {self.cluster.name} - {e}")
+            raise
 
     def _prepare_bootstrap_gcs(self):
         template_dir = (
@@ -385,7 +407,7 @@ class ClusterInfo:
         }
         try:
             logger.info("Invoking Terraform Init")
-            utils.run_terraform(terraform_dir, "init")
+            utils.run_terraform(terraform_dir, "init", extra_env=extra_env)
             utils.run_terraform(terraform_dir, "validate", extra_env=extra_env)
             logger.info("Invoking Terraform Plan")
             utils.run_terraform(terraform_dir, "plan", extra_env=extra_env)
@@ -646,85 +668,89 @@ class ClusterInfo:
             logger.info("Invoking Terraform Apply")
             utils.run_terraform(terraform_dir, "apply", extra_env=extra_env)
 
-            # Look for Management and Login Nodes in TF state file
-            tf_state_file = terraform_dir / "terraform.tfstate"
-            with tf_state_file.open("r") as statefp:
-                state = json.load(statefp)
+            # The apply succeeded, so the cluster's resources exist. Record
+            # that before anything below can fail (reading the state back,
+            # registry or node bookkeeping), so the cluster stays managed.
+            self.cluster.internal_name = self.cluster.name
+            self.cluster.cloud_state = "m"
+            self.cluster.save()
 
-                # Extract and save Artifact Registry repository and secret information (if any)
-                self.extract_and_update_registry_info(state)
+            # Look for Management and Login Nodes in the Terraform state
+            state = utils.get_terraform_state(terraform_dir, extra_env)
 
-                # Apply Perms to the service accounts
-                try:
-                    service_accounts = self._get_service_accounts(state)
-                    self._apply_service_account_permissions(service_accounts)
-                except Exception as e:
-                    # Be nicer to the user and continue creating cluster
-                    logger.warning(f"An error occurred while applying permissions to service accounts: {e}")
+            # Extract and save Artifact Registry repository and secret information (if any)
+            self.extract_and_update_registry_info(state)
+
+            # Apply Perms to the service accounts
+            try:
+                service_accounts = self._get_service_accounts(state)
+                self._apply_service_account_permissions(service_accounts)
+            except Exception as e:
+                # Be nicer to the user and continue creating cluster
+                logger.warning(f"An error occurred while applying permissions to service accounts: {e}")
 
 
-                # Cluster is now being initialized
-                self.cluster.internal_name = self.cluster.name
-                self.cluster.cloud_state = "m"
+            # Cluster initialization is now running. Stamp the start time
+            # so a bootstrap that stalls (controller never reports ready)
+            # can be surfaced instead of spinning on "initialising".
+            self.cluster.status = "i"
+            self.cluster.initialization_started = timezone.now()
+            self.cluster.save()
 
-                # Cluster initialization is now running.
-                self.cluster.status = "i"
-                self.cluster.save()
-
-                # Filters for Management Nodes (Controller)
-                mgmt_filters = {
-                    "module": "module.slurm_controller",
-                    "type": "google_compute_instance_from_template",
-                    "name": "controller",
-                }
-                mgmt_nodes = self._create_model_instances_from_tf_state(
-                    state,
-                    mgmt_filters,
+            # Filters for Management Nodes (Controller)
+            mgmt_filters = {
+                "module": "module.slurm_controller",
+                "type": "google_compute_instance_from_template",
+                "name": "controller",
+            }
+            mgmt_nodes = self._create_model_instances_from_tf_state(
+                state,
+                mgmt_filters,
+            )
+            if len(mgmt_nodes) != 1:
+                logger.warning(
+                    "Found %d controller nodes, there should be only 1",
+                    len(mgmt_nodes),
                 )
-                if len(mgmt_nodes) != 1:
-                    logger.warning(
-                        "Found %d controller nodes, there should be only 1",
-                        len(mgmt_nodes),
-                    )
-                if len(mgmt_nodes):
-                    node = mgmt_nodes[0]
-                    node.save()
-                    self.cluster.controller_node = node
-                    logger.info(
-                        "Created cluster controller node with IP address %s",
-                        node.public_ip if node.public_ip else node.internal_ip,
-                    )
-
-                # Filters for Login Nodes
-                login_filters = {
-                    "module": 'module.slurm_controller.module.login["slurm-login"].module.instance',
-                    "type": "google_compute_instance_from_template",
-                    "name": "slurm_instance",
-                }
-                login_nodes = self._create_model_instances_from_tf_state(
-                    state,
-                    login_filters,
+            if len(mgmt_nodes):
+                node = mgmt_nodes[0]
+                node.save()
+                self.cluster.controller_node = node
+                logger.info(
+                    "Created cluster controller node with IP address %s",
+                    node.public_ip if node.public_ip else node.internal_ip,
                 )
-                if len(login_nodes) != self.cluster.num_login_nodes:
-                    logger.warning(
-                        "Found %d login nodes, expected %d from config",
-                        len(login_nodes),
-                        self.cluster.num_login_nodes,
-                    )
-                for lnode in login_nodes:
-                    lnode.cluster_login = self.cluster
-                    lnode.save()
-                    logger.info(
-                        "Created login node with IP address %s",
-                        lnode.public_ip
-                        if lnode.public_ip
-                        else lnode.internal_ip,
-                    )
 
-                # Set up Spack Install location
-                self._configure_spack_install_loc()
+            # Filters for Login Nodes
+            login_filters = {
+                "module": 'module.slurm_controller.module.login["slurm-login"].module.instance',
+                "type": "google_compute_instance_from_template",
+                "name": "slurm_instance",
+            }
+            login_nodes = self._create_model_instances_from_tf_state(
+                state,
+                login_filters,
+            )
+            if len(login_nodes) != self.cluster.num_login_nodes:
+                logger.warning(
+                    "Found %d login nodes, expected %d from config",
+                    len(login_nodes),
+                    self.cluster.num_login_nodes,
+                )
+            for lnode in login_nodes:
+                lnode.cluster_login = self.cluster
+                lnode.save()
+                logger.info(
+                    "Created login node with IP address %s",
+                    lnode.public_ip
+                    if lnode.public_ip
+                    else lnode.internal_ip,
+                )
 
-                self.cluster.save()
+            # Set up Spack Install location
+            self._configure_spack_install_loc()
+
+            self.cluster.save()
 
         except subprocess.CalledProcessError as err:
             # We can error during provisioning, in which case Terraform
@@ -748,6 +774,12 @@ class ClusterInfo:
             self.cluster.save()
 
             utils.run_terraform(terraform_dir, "destroy", extra_env=extra_env)
+
+            # Dynamic compute nodes are created directly via the GCP API by
+            # slurm-gcp at job-schedule time, so they are not in Terraform state
+            # and can survive the destroy above (still running and billing).
+            # Sweep any that carry this cluster's Slurm label.
+            self._sweep_orphaned_compute_nodes()
 
             # Mark Container Registry objects as deleted
             registries = ContainerRegistry.objects.filter(cluster=self.cluster)
@@ -779,6 +811,69 @@ class ClusterInfo:
             if err.stderr:
                 logger.info("TF stderr:\n%s\n", err.stderr.decode("utf-8"))
             raise
+
+    def _sweep_orphaned_compute_nodes(self):
+        """Delete any leftover compute instances still labelled for this cluster.
+
+        Best-effort safety net: slurm-gcp creates burst compute nodes directly
+        through the GCP API, so they are not tracked by Terraform and a destroy
+        (or the controller dying mid-teardown) can leave them running. Failures
+        here must never break teardown, which has already completed.
+        """
+        try:
+            from google.cloud import compute_v1
+            from google.oauth2 import service_account
+
+            project_id = self.cluster.project_id
+            cluster_name = self.cluster.cloud_id
+            if not project_id or not cluster_name:
+                return
+
+            credentials = service_account.Credentials.from_service_account_info(
+                json.loads(self.cluster.cloud_credential.detail)
+            )
+            client = compute_v1.InstancesClient(credentials=credentials)
+            request = compute_v1.AggregatedListInstancesRequest(
+                project=project_id,
+                filter=f"labels.slurm_cluster_name={cluster_name}",
+                return_partial_success=True,
+            )
+
+            deleted = 0
+            for zone_scope, scoped in client.aggregated_list(request=request):
+                for instance in getattr(scoped, "instances", []) or []:
+                    # Skip nodes GCP is already tearing down.
+                    if instance.status in ("STOPPING", "TERMINATED"):
+                        continue
+                    zone = zone_scope.split("/")[-1]
+                    logger.warning(
+                        "Deleting orphaned compute node %s in %s "
+                        "(cluster %s left it running after destroy)",
+                        instance.name, zone, cluster_name,
+                    )
+                    # One failed delete (transient API error, node already
+                    # going away) must not abandon the rest of the sweep.
+                    try:
+                        client.delete(
+                            project=project_id, zone=zone, instance=instance.name
+                        )
+                        deleted += 1
+                    except Exception as delete_err:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to delete orphaned node %s in %s: %s",
+                            instance.name, zone, delete_err,
+                        )
+
+            if deleted:
+                logger.warning(
+                    "Swept %d orphaned compute node(s) for cluster %s",
+                    deleted, cluster_name,
+                )
+        except Exception as err:  # noqa: BLE001 - best-effort cleanup
+            logger.warning(
+                "Orphaned compute node sweep failed for cluster %s: %s",
+                self.cluster.cloud_id, err,
+            )
 
     def _configure_spack_install_loc(self):
         """Configures the spack_install field.

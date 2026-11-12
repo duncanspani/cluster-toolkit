@@ -14,17 +14,15 @@
 ---
 blueprint_name: slurm-h4d
 vars:
-  # Set to true to enable the secure Slurm Native Authentication standard.
-  # Default fallback remains false (MUNGE) to guarantee zero regression risk on upgrades.
-  enable_slurm_auth: false
   project_id: ## Set GCP Project ID Here ##
   deployment_name: slurm-h4d
   region: us-central1
   zone: us-central1-a
   rdma_net_range: 192.168.128.0/18
   instance_image:
-    family: slurm-gcp-6-12-hpc-rocky-linux-8
-    project: schedmd-slurm-public
+    # Rocky 9: aci-cpu-rocky-linux-9-slurm-2605-amd64
+    family: aci-cpu-rocky-linux-9-slurm-2605-amd64
+    project: advanced-compute-images
   h4d_cluster_size: 2
 
   #Provisioning model, select one, lack of selection will rely on on-demand capacity
@@ -34,6 +32,14 @@ vars:
 
 # Documentation for each of the modules used below can be found at
 # https://github.com/GoogleCloudPlatform/hpc-toolkit/blob/main/modules/README.md
+
+  # Optional overrides (defaults shown)
+  # Size in GB of the /home Filestore instance.
+  homefs_size_gb: 2560
+  # Maximum number of dynamically provisioned nodes in the h4d partition.
+  h4d_node_count_dynamic_max: 0
+  # Machine type for the login node.
+  login_machine_type: n2-standard-4
 deployment_groups:
 - group: primary
   modules:
@@ -61,19 +67,21 @@ deployment_groups:
         subnet_region: $(vars.region)
         subnet_ip: $(vars.rdma_net_range)
         region: $(vars.region)
+      nic_type: "IRDMA"
 
   - id: homefs
     source: modules/file-system/filestore
     use: [h4d-slurm-net-0]
     settings:
       filestore_tier: BASIC_SSD
-      size_gb: 2560
+      size_gb: $(vars.homefs_size_gb)
       filestore_share_name: homeshare
       local_mount: /home
 
   - id: h4d_startup
     source: modules/scripts/startup-script
     settings:
+      install_ansible: false
       set_ofi_cloud_rdma_tunables: true
       local_ssd_filesystem:
         fs_type: ext4
@@ -90,7 +98,7 @@ deployment_groups:
       bandwidth_tier: gvnic_enabled
       machine_type: h4d-highmem-192-lssd
       node_count_static: $(vars.h4d_cluster_size)
-      node_count_dynamic_max: 0
+      node_count_dynamic_max: $(vars.h4d_node_count_dynamic_max)
       enable_placement: false
       enable_spot_vm: $(vars.h4d_enable_spot_vm)
 
@@ -101,21 +109,7 @@ deployment_groups:
 
       disk_type: hyperdisk-balanced
       on_host_maintenance: TERMINATE
-      additional_networks:
-        $(concat(
-          [{
-            network=null,
-            subnetwork=h4d-rdma-net.subnetwork_self_link,
-            subnetwork_project=vars.project_id,
-            nic_type="IRDMA",
-            queue_count=null,
-            network_ip=null,
-            stack_type=null,
-            access_config=null,
-            ipv6_access_config=[],
-            alias_ip_range=[]
-          }]
-        ))
+      additional_networks: $(h4d-rdma-net.instance_additional_networks)
 
   - id: h4d_partition
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -133,7 +127,7 @@ deployment_groups:
     source: community/modules/scheduler/schedmd-slurm-gcp-v6-login
     use: [h4d-slurm-net-0]
     settings:
-      machine_type: n2-standard-4
+      machine_type: $(vars.login_machine_type)
       enable_login_public_ips: true
 
   - id: controller_startup

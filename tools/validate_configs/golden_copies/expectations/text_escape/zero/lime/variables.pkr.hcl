@@ -68,9 +68,31 @@ variable "omit_external_ip" {
   default     = true
 }
 
+variable "network_ip" {
+  description = "The network IP address reserved to use for the launched instance"
+  type        = string
+  default     = null
+}
+
+variable "address" {
+  description = "The name of a pre-allocated static external IP address. If specified, omit_external_ip must be set to false."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Assign network tags to apply firewall rules to VM instance"
   type        = list(string)
+  default     = null
+}
+
+variable "image_encryption_key" {
+  description = <<-DOC
+    The full resource name of a Cloud KMS CryptoKey used to encrypt the
+    produced image (CMEK). The Compute Engine service agent must hold
+    roles/cloudkms.cryptoKeyEncrypterDecrypter on the key.
+  DOC
+  type        = string
   default     = null
 }
 
@@ -105,7 +127,7 @@ variable "source_image" {
 variable "source_image_family" {
   description = "Alternative to source_image. Specify image family to build from latest image in family"
   type        = string
-  default     = "hpc-rocky-linux-8"
+  default     = "hpc-rocky-linux-9"
 }
 
 variable "service_account_email" {

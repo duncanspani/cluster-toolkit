@@ -1,7 +1,7 @@
 # PREAMBLE
 MIN_PACKER_VERSION=1.15.3 # for building images
 MIN_TERRAFORM_VERSION=1.12.2 # for deploying modules
-MIN_GOLANG_VERSION=1.24 # for building gcluster
+MIN_GOLANG_VERSION=1.26 # for building gcluster
 
 .PHONY: install install-user tests format install-dev-deps \
         warn-go-missing warn-terraform-missing warn-packer-missing \
@@ -22,9 +22,11 @@ ifneq (, $(shell which git))
 ## GIT IS PRESENT
 ifneq (,$(wildcard .git))
 ## GIT DIRECTORY EXISTS
-GIT_TAG_VERSION=$(shell git tag --points-at HEAD)
-GIT_BRANCH=$(shell $(SHELL) -c 'git branch --show-current || git rev-parse --abbrev-ref HEAD' 2>/dev/null)
-GIT_COMMIT_INFO=$(shell git describe --tags --dirty --long --always)
+GIT_TAG_VERSION ?= $(or $(_LOUHI_TAG_NAME),$(shell git describe --tags --exact-match 2>/dev/null))
+GIT_BRANCH ?= $(shell $(SHELL) -c 'git branch --show-current || git rev-parse --abbrev-ref HEAD' 2>/dev/null)
+# Keep GIT_COMMIT_INFO pure `git describe` output: the release pipeline's verify step compares
+# "Commit info: <tag>-0-g<sha>" against the release tag as an independent check of the checkout.
+GIT_COMMIT_INFO ?= $(shell git describe --tags --dirty --long --always 2>/dev/null)
 GIT_COMMIT_HASH=$(shell git rev-parse HEAD)
 GIT_INITIAL_HASH=$(shell git rev-list --max-parents=0 HEAD)
 endif
@@ -34,7 +36,7 @@ endif
 
 gcluster: warn-go-version warn-terraform-version warn-packer-version $(shell find ./cmd ./pkg gcluster.go -type f)
 	$(info **************** building gcluster ************************)
-	@go build -ldflags="-X 'main.gitTagVersion=$(GIT_TAG_VERSION)' -X 'main.gitBranch=$(GIT_BRANCH)' -X 'main.gitCommitInfo=$(GIT_COMMIT_INFO)' -X 'main.gitCommitHash=$(GIT_COMMIT_HASH)' -X 'main.gitInitialHash=$(GIT_INITIAL_HASH)' -X 'main.gitIsOfficial=$(GIT_IS_OFFICIAL)' -X 'main.installationMode=$(INSTALLATION_MODE)'" gcluster.go
+	@CGO_ENABLED=0 go build -ldflags="-X 'main.gitTagVersion=$(GIT_TAG_VERSION)' -X 'main.gitBranch=$(GIT_BRANCH)' -X 'main.gitCommitInfo=$(GIT_COMMIT_INFO)' -X 'main.gitCommitHash=$(GIT_COMMIT_HASH)' -X 'main.gitInitialHash=$(GIT_INITIAL_HASH)' -X 'main.gitIsOfficial=$(GIT_IS_OFFICIAL)' -X 'main.installationMode=$(INSTALLATION_MODE)'" gcluster.go
 	@ln -sf gcluster ghpc
 
 ghpc: gcluster
@@ -56,7 +58,7 @@ install: install-user
 
 endif
 
-tests: warn-terraform-version warn-packer-version test-engine validate_golden_copy validate_configs packer-check
+tests: warn-terraform-version warn-packer-version test-engine validate_golden_copy validate_configs packer-check validate-docs test-agentgateway
 
 format: warn-go-version warn-terraform-version warn-packer-version terraform-format packer-format
 	$(info **************** formatting go code *******************)
@@ -64,14 +66,13 @@ format: warn-go-version warn-terraform-version warn-packer-version terraform-for
 
 install-dev-deps: warn-terraform-version warn-packer-version check-pre-commit check-tflint check-shellcheck
 	$(info *********** installing developer dependencies *********)
-	go install github.com/terraform-docs/terraform-docs@latest
-	go install golang.org/x/lint/golint@latest
-	go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
-	go install github.com/go-critic/go-critic/cmd/gocritic@latest
-	go install github.com/google/addlicense@latest
-	go install mvdan.cc/sh/v3/cmd/shfmt@v3.12.0
-	go install golang.org/x/tools/cmd/goimports@v0.42.0
-	go install honnef.co/go/tools/cmd/staticcheck@latest
+	go install github.com/terraform-docs/terraform-docs@v0.24.0
+	go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+	go install github.com/go-critic/go-critic/cmd/gocritic@v0.15.0
+	go install github.com/google/addlicense@v1.2.0
+	go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
+	go install golang.org/x/tools/cmd/goimports@v0.50.0
+	go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 	go install github.com/jstemmer/go-junit-report/v2@latest
 	pip install -r community/modules/scheduler/schedmd-slurm-gcp-v6-controller/modules/slurm_files/scripts/requirements-dev.txt
 	pip install mypy==1.18.2
@@ -256,3 +257,50 @@ packer-format:
 endif
 endif
 # END OF PACKER SECTION
+
+###################################
+# AGENT SKILLS SECTION
+.PHONY: lint-skills test-skills test-skills-live generate-docs validate-docs check-cloud-docs
+
+lint-skills:
+	$(info **************** linting agent skills ***************)
+	@python3 tools/run_eval.py --lint-only --all
+
+test-skills:
+	$(info **************** running skills unit tests and evals ***************)
+	@python3 tools/tests/test_run_eval.py
+	@python3 tools/run_eval.py --all
+
+generate-docs:
+	$(info **************** generating catalog, README tables, and llms.txt ***************)
+	@go run ./tools/catalog-gen
+
+# Manual only (never CI): drives a real agent CLI against every EVAL.yaml prompt
+# in throwaway git worktrees. Requires the agent CLI installed + logged in and a
+# GCP project for gcluster validators. Example:
+#   make test-skills-live LIVE_PROJECT=my-sandbox LIVE_AGENT=gemini
+LIVE_AGENT ?= gemini
+LIVE_SKILL ?= cluster-blueprint-assistant
+test-skills-live: gcluster
+	$(info **************** running LIVE skills evals ($(LIVE_SKILL)) against $(LIVE_AGENT) ***************)
+	@test -n "$(LIVE_PROJECT)" || { echo "LIVE_PROJECT=<gcp-project> is required"; exit 2; }
+	@python3 tools/run_eval.py --skill $(LIVE_SKILL) --live --agent $(LIVE_AGENT) --project $(LIVE_PROJECT) --markdown-output live-eval-report.md
+
+validate-docs:
+	$(info **************** validating README snippets and links ***************)
+	@python3 tools/validate_readme_snippets.py
+	@python3 tools/tests/test_validate_cloud_docs.py
+
+check-cloud-docs:
+	$(info **************** validating public cloud.google.com docs against repo (use main/latest tag for release-accurate results) ***************)
+	@python3 tools/validate_cloud_docs.py --check-live
+# END OF AGENT SKILLS SECTION
+
+.PHONY: test-agentgateway agentgateway-static
+test-agentgateway:
+	go test ./tests
+	python3 -m unittest tests.test_agentgateway tests.agentgateway_playbook_checks
+
+# Requires Helm >= 3.12 and Python packages PyYAML and jsonschema.
+agentgateway-static:
+	python3 tools/validate_configs/agentgateway/validate_static.py

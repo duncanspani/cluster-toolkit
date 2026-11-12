@@ -11,9 +11,8 @@ Toolkit, see the extended [Network Storage documentation](../../../../docs/netwo
 
 If you are using Hyperdisk storage, check the possible disk size, IOPS, and throughput values for each disk type in the [Hyperdisk limits documentation](https://cloud.google.com/compute/docs/disks/hyperdisks#limits-disk).
 
-> **_WARNING:_** This module has only been tested against the HPC centos7 OS
-> disk image (the default). Using other images may work, but have not been
-> verified.
+> **_NOTE:_** By default, this module uses the `hpc-rocky-linux-9` OS disk
+> image family from `cloud-hpc-image-public`.
 
 [disk]: https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_disk
 
@@ -84,7 +83,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 6.14 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | >= 3.0 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
@@ -118,14 +117,17 @@ No modules.
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_auto_delete_disk"></a> [auto\_delete\_disk](#input\_auto\_delete\_disk) | DEPRECATED: Whether or not the NFS disk should be auto-deleted | `string` | `null` | no |
+| <a name="input_boot_disk_provisioned_iops"></a> [boot\_disk\_provisioned\_iops](#input\_boot\_disk\_provisioned\_iops) | Indicates how many IOPS to provision for the boot disk. This sets the number of I/O operations per second that the disk can handle. | `number` | `null` | no |
+| <a name="input_boot_disk_provisioned_throughput"></a> [boot\_disk\_provisioned\_throughput](#input\_boot\_disk\_provisioned\_throughput) | Indicates how much throughput to provision for the boot disk, in MB/s. This sets the amount of data that can be read or written from the disk per second. | `number` | `null` | no |
 | <a name="input_boot_disk_size"></a> [boot\_disk\_size](#input\_boot\_disk\_size) | Storage size in GB for the boot disk | `number` | `null` | no |
+| <a name="input_boot_disk_storage_pool"></a> [boot\_disk\_storage\_pool](#input\_boot\_disk\_storage\_pool) | Storage pool to use for the boot disk. Note that storage pools are only supported with Hyperdisk types. For boot disks, only hyperdisk-balanced is supported. You must provide an existing storage pool, as this module does not create new ones. | `string` | `null` | no |
 | <a name="input_boot_disk_type"></a> [boot\_disk\_type](#input\_boot\_disk\_type) | Storage type for the boot disk | `string` | `null` | no |
 | <a name="input_create_boot_snapshot_before_destroy"></a> [create\_boot\_snapshot\_before\_destroy](#input\_create\_boot\_snapshot\_before\_destroy) | Whether to create a snapshot before destroying the boot disk | `bool` | `false` | no |
 | <a name="input_create_snapshot_before_destroy"></a> [create\_snapshot\_before\_destroy](#input\_create\_snapshot\_before\_destroy) | Whether to create a snapshot before destroying the NFS data disk | `bool` | `false` | no |
 | <a name="input_deployment_name"></a> [deployment\_name](#input\_deployment\_name) | Name of the HPC deployment, used as name of the NFS instance if no name is specified. | `string` | n/a | yes |
 | <a name="input_disk_size"></a> [disk\_size](#input\_disk\_size) | Storage size in GB for the NFS data disk | `number` | `"100"` | no |
 | <a name="input_image"></a> [image](#input\_image) | DEPRECATED: The VM image used by the NFS server | `string` | `null` | no |
-| <a name="input_instance_image"></a> [instance\_image](#input\_instance\_image) | The VM image used by the NFS server.<br/><br/>Expected Fields:<br/>name: The name of the image. Mutually exclusive with family.<br/>family: The image family to use. Mutually exclusive with name.<br/>project: The project where the image is hosted. | `map(string)` | <pre>{<br/>  "family": "hpc-rocky-linux-8",<br/>  "project": "cloud-hpc-image-public"<br/>}</pre> | no |
+| <a name="input_instance_image"></a> [instance\_image](#input\_instance\_image) | The VM image used by the NFS server.<br/><br/>Expected Fields:<br/>name: The name of the image. Mutually exclusive with family.<br/>family: The image family to use. Mutually exclusive with name.<br/>project: The project where the image is hosted. | `map(string)` | <pre>{<br/>  "family": "hpc-rocky-linux-9",<br/>  "project": "cloud-hpc-image-public"<br/>}</pre> | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels to add to the NFS instance. Key-value pairs. | `map(string)` | n/a | yes |
 | <a name="input_local_mounts"></a> [local\_mounts](#input\_local\_mounts) | Mountpoint for this NFS compute instance | `list(string)` | <pre>[<br/>  "/data"<br/>]</pre> | no |
 | <a name="input_machine_type"></a> [machine\_type](#input\_machine\_type) | Type of the VM instance to use | `string` | `"n2d-standard-2"` | no |
@@ -137,6 +139,7 @@ No modules.
 | <a name="input_provisioned_throughput"></a> [provisioned\_throughput](#input\_provisioned\_throughput) | Provisioned throughput for the NFS data disk if using Hyperdisk Balanced/Extreme | `number` | `null` | no |
 | <a name="input_scopes"></a> [scopes](#input\_scopes) | Scopes to apply to the controller | `list(string)` | <pre>[<br/>  "https://www.googleapis.com/auth/cloud-platform"<br/>]</pre> | no |
 | <a name="input_service_account"></a> [service\_account](#input\_service\_account) | Service Account for the NFS server | `string` | `null` | no |
+| <a name="input_storage_pool"></a> [storage\_pool](#input\_storage\_pool) | Storage pool to use for the NFS data disk. Note that storage pools are only supported with Hyperdisk types. You must provide an existing storage pool, as this module does not create new ones. | `string` | `null` | no |
 | <a name="input_subnetwork_self_link"></a> [subnetwork\_self\_link](#input\_subnetwork\_self\_link) | The self link of the subnetwork to attach the NFS VM. | `string` | `null` | no |
 | <a name="input_type"></a> [type](#input\_type) | Storage type for the NFS data disk | `string` | `"pd-ssd"` | no |
 | <a name="input_zone"></a> [zone](#input\_zone) | The zone name where the NFS instance located in. | `string` | n/a | yes |

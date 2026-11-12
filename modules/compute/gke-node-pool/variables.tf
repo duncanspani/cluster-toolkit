@@ -71,6 +71,12 @@ variable "disk_type" {
   default     = null
 }
 
+variable "disk_storage_pool" {
+  description = "Storage pool to use for the node's boot disk. Note that storage pools are only supported with Hyperdisk types. For boot disks, only hyperdisk-balanced is supported. You must provide an existing storage pool, as this module does not create new ones."
+  type        = string
+  default     = null
+}
+
 variable "enable_gcfs" {
   description = "Enable the Google Container Filesystem (GCFS). See [restrictions](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/container_cluster#gcfs_config)."
   type        = bool
@@ -117,9 +123,26 @@ variable "guest_accelerator" {
 }
 
 variable "image_type" {
-  description = "The default image type used by NAP once a new node pool is being created. Use either COS_CONTAINERD or UBUNTU_CONTAINERD."
+  description = "The OS image type for the nodes in this node pool. Use either COS_CONTAINERD or UBUNTU_CONTAINERD. Use CUSTOM_CONTAINERD together with var.node_image_config to run a custom node image."
   type        = string
   default     = "COS_CONTAINERD"
+}
+
+variable "node_image_config" {
+  description = <<-EOT
+  Custom OS image for the nodes. Requires var.image_type = "CUSTOM_CONTAINERD".
+  The GKE service agent of the project needs roles/compute.imageUser on image_project.
+  EOT
+  type = object({
+    image         = optional(string)
+    image_project = optional(string)
+  })
+  default  = null
+  nullable = true
+  validation {
+    condition     = var.node_image_config == null || try(length(var.node_image_config.image) > 0, false)
+    error_message = "The 'image' attribute must be specified when 'node_image_config' is provided."
+  }
 }
 
 variable "local_ssd_count_ephemeral_storage" {
@@ -171,6 +194,12 @@ variable "static_node_count" {
   description = "The static number of nodes in the node pool. If set, autoscaling will be disabled."
   type        = number
   default     = null
+}
+
+variable "ignore_node_count_changes" {
+  description = "Whether to ignore external changes (drift) to the node count (e.g. from out-of-band resizes using gcloud). Setting this to true allows node pool size changes made outside Terraform to be preserved instead of reverted on subsequent applies."
+  type        = bool
+  default     = false
 }
 
 variable "is_reservation_active" {
@@ -267,13 +296,13 @@ variable "service_account_email" {
 }
 
 variable "service_account_scopes" {
-  description = "Scopes to to use with the node pool."
+  description = "Scopes to use with the node pool."
   type        = set(string)
   default     = ["https://www.googleapis.com/auth/cloud-platform"]
 }
 
 variable "taints" {
-  description = "Taints to be applied to the system node pool."
+  description = "Kubernetes taints to be applied to the nodes in this node pool. GPU and TPU node pools always also receive their accelerator taint (nvidia.com/gpu=present or google.com/tpu=present, effect NO_SCHEDULE) in addition to these."
   type = list(object({
     key    = string
     value  = any
@@ -297,15 +326,33 @@ variable "kubernetes_labels" {
 }
 
 variable "timeout_create" {
-  description = "Timeout for creating a node pool"
+  description = "Timeout for creating a node pool (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (2h)."
   type        = string
   default     = null
+  validation {
+    condition     = var.timeout_create == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_create)) && !can(regex("^(0+(s|m|h))+$", var.timeout_create)))
+    error_message = "timeout_create must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
 }
 
 variable "timeout_update" {
-  description = "Timeout for updating a node pool"
+  description = "Timeout for updating a node pool (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (2h)."
   type        = string
   default     = null
+  validation {
+    condition     = var.timeout_update == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_update)) && !can(regex("^(0+(s|m|h))+$", var.timeout_update)))
+    error_message = "timeout_update must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
+}
+
+variable "timeout_delete" {
+  description = "Timeout for deleting a node pool (e.g., '30m', '60m', '2h', '1h30m'). Must be a positive duration string with 's', 'm', or 'h' units. If null, defaults to the Terraform provider timeout (2h)."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.timeout_delete == null || (can(regex("^([0-9]+(s|m|h))+$", var.timeout_delete)) && !can(regex("^(0+(s|m|h))+$", var.timeout_delete)))
+    error_message = "timeout_delete must be a positive duration string using 's', 'm', or 'h' units (e.g., '30m', '60m', '1h30m', '2h'), or null."
+  }
 }
 
 # Deprecated
@@ -379,12 +426,17 @@ variable "reservation_affinity" {
   It is assumed that the specified reservation exists and has available capacity.
   For a shared reservation, specify the project_id as well in which it was created.
   To create a reservation refer to https://cloud.google.com/compute/docs/instances/reservations-single-project and https://cloud.google.com/compute/docs/instances/reservations-shared
+  To pin each of the num_node_pools node pools to its own reservation sub-block, set reservation_subblocks (map of key,
+  e.g. "02-0001", to RESERVATION/reservationBlocks/BLOCK/reservationSubBlocks/SUBBLOCK). With pin_to_subblocks = true,
+  gcluster create/deploy proposes free sub-blocks and saves the map to the deployment file; see README.
   EOT
   type = object({
     consume_reservation_type = string
     specific_reservations = optional(list(object({
-      name    = string
-      project = optional(string)
+      name                  = string
+      project               = optional(string)
+      reservation_subblocks = optional(map(string))
+      pin_to_subblocks      = optional(bool)
     })))
   })
   default = {
@@ -394,6 +446,46 @@ variable "reservation_affinity" {
   validation {
     condition     = contains(["NO_RESERVATION", "ANY_RESERVATION", "SPECIFIC_RESERVATION"], var.reservation_affinity.consume_reservation_type)
     error_message = "Accepted values are: {NO_RESERVATION, ANY_RESERVATION, SPECIFIC_RESERVATION}"
+  }
+  validation {
+    condition = alltrue([
+      for k in keys(coalesce(try(var.reservation_affinity.specific_reservations[0].reservation_subblocks, null), {})) :
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", k))
+    ])
+    error_message = "reservation_subblocks keys must contain only lowercase letters, digits and hyphens, and must start and end with a letter or digit."
+  }
+  validation {
+    condition = alltrue([
+      for p in values(coalesce(try(var.reservation_affinity.specific_reservations[0].reservation_subblocks, null), {})) :
+      can(regex("^[a-z0-9-]+/reservationBlocks/[a-z0-9-]+/reservationSubBlocks/[a-z0-9-]+$", p))
+    ])
+    error_message = "Each reservation_subblocks value must have the format RESERVATION/reservationBlocks/BLOCK/reservationSubBlocks/SUBBLOCK."
+  }
+  validation {
+    condition = (
+      length(distinct(values(coalesce(try(var.reservation_affinity.specific_reservations[0].reservation_subblocks, null), {})))) ==
+      length(coalesce(try(var.reservation_affinity.specific_reservations[0].reservation_subblocks, null), {}))
+    )
+    error_message = "reservation_subblocks must not map two keys to the same sub-block."
+  }
+  validation {
+    condition = alltrue([
+      for r in coalesce(var.reservation_affinity.specific_reservations, []) :
+      (length(coalesce(r.reservation_subblocks, {})) == 0 && !coalesce(r.pin_to_subblocks, false)) || (
+        var.reservation_affinity.consume_reservation_type == "SPECIFIC_RESERVATION" &&
+        length(var.reservation_affinity.specific_reservations) == 1 &&
+        !strcontains(r.name, "/") &&
+        alltrue([for p in values(coalesce(r.reservation_subblocks, {})) : startswith(p, "${r.name}/reservationBlocks/")])
+      )
+    ])
+    error_message = "reservation_subblocks and pin_to_subblocks require consume_reservation_type = SPECIFIC_RESERVATION, exactly one specific reservation whose name is the bare reservation name (no '/'), and every reservation_subblocks value must start with '<that name>/reservationBlocks/'."
+  }
+  validation {
+    condition = alltrue([
+      for r in coalesce(var.reservation_affinity.specific_reservations, []) :
+      !coalesce(r.pin_to_subblocks, false) || length(coalesce(r.reservation_subblocks, {})) > 0
+    ])
+    error_message = "pin_to_subblocks requires a non-empty reservation_subblocks. gcluster create/deploy proposes and saves it; when using Terraform without gcluster, set reservation_subblocks yourself."
   }
 }
 
@@ -444,7 +536,7 @@ variable "upgrade_settings" {
 }
 
 variable "run_workload_script" {
-  description = "Whether execute the script to create a sample workload and inject rxdm sidecar into workload. Currently, implemented for A3-Highgpu and A3-Megagpu only."
+  description = "If true, runs a local Python helper script (installing pyyaml via pip3) to generate a sample workload manifest with the rxdm sidecar injected. Only runs when machine_type is a3-highgpu-8g or a3-megagpu-8g."
   type        = bool
   default     = true
 }
@@ -504,8 +596,8 @@ variable "enable_numa_aware_scheduling" {
 
 variable "enable_dranet" {
   type        = bool
-  default     = null
-  description = "Enable GKE managed Dynamic Resource Allocation (DRA) driver for networking (DRANET) and Accelerator Network Profile (ANP). If null, automatically enabled for supported GPU/TPU nodes on GKE 1.34.1-gke.1829001 or later when Dataplane V2 is enabled on the cluster."
+  default     = false
+  description = "Enable GKE managed Dynamic Resource Allocation (DRA) driver for networking (DRANET) and Accelerator Network Profile (ANP). When set to true, this enables the driver for supported GPU/TPU nodes on GKE 1.34.1-gke.1829001 or later when Dataplane V2 is enabled on the cluster."
 }
 
 variable "autoscaling_min_node_count" {
@@ -548,4 +640,53 @@ variable "machine_configs" {
   description = "Definition of GCE machine types and counts"
   type        = any
   default     = {}
+}
+
+variable "dranet_device_class_name" {
+  type        = string
+  default     = null
+  description = "DRA device class name. If null, automatically detected based on machine type. Default is mrdma.google.com (RDMA) for RDMA-supported machines, netdev.google.com for others."
+}
+
+variable "install_dranet_template" {
+  type        = bool
+  default     = true
+  description = "If true, automatically deploys the DRANET ResourceClaimTemplate. The compiler automatically overrides this to false for subsequent node pools in the same cluster if they use the same device class."
+}
+
+
+variable "dranet_allocation_mode" {
+  type        = string
+  default     = "All"
+  description = "Allocation mode for the auto-applied DRANET ResourceClaimTemplate (e.g., 'All' or 'ExactCount')."
+}
+
+variable "dranet_device_count" {
+  type        = number
+  default     = null
+  description = "Device count for the auto-applied DRANET ResourceClaimTemplate. Required if dranet_allocation_mode is 'ExactCount'."
+}
+
+variable "enable_confidential_nodes" {
+  description = "Enable Confidential Nodes for this node pool."
+  type        = bool
+  default     = false
+}
+
+variable "confidential_instance_type" {
+  description = "The type of technology used by the confidential nodes (e.g., SEV, SEV_SNP, TDX). Leave null for default."
+  type        = string
+  default     = null
+}
+
+variable "enable_confidential_storage" {
+  description = "Enable Confidential Storage on the node pool. Node boot disks will be encrypted using keys protected by the Confidential VM."
+  type        = bool
+  default     = false
+}
+
+variable "boot_disk_kms_key" {
+  description = "The Customer Managed Encryption Key (CMEK) used to encrypt the boot disks of the GKE nodes. Required if enable_confidential_storage is true."
+  type        = string
+  default     = null
 }

@@ -17,7 +17,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | ~> 4.0 |
 | <a name="requirement_google-beta"></a> [google-beta](#requirement\_google-beta) | ~> 4.0 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | ~> 3.0 |
@@ -66,9 +66,10 @@ limitations under the License.
 | <a name="input_region"></a> [region](#input\_region) | GCP Region for HPC Frontend deployment. | `string` | n/a | yes |
 | <a name="input_repo_branch"></a> [repo\_branch](#input\_repo\_branch) | git branch to checkout when deploying the HPC Frontend | `string` | `"main"` | no |
 | <a name="input_repo_fork"></a> [repo\_fork](#input\_repo\_fork) | GitHub repository name in which to find the cluster-toolkit repo | `string` | `"GoogleCloudPlatform"` | no |
-| <a name="input_server_instance_type"></a> [server\_instance\_type](#input\_server\_instance\_type) | Instance size to use from HPC Frontend webserver | `string` | `"e2-standard-2"` | no |
+| <a name="input_server_instance_type"></a> [server\_instance\_type](#input\_server\_instance\_type) | Instance size to use from HPC Frontend webserver | `string` | `"n2d-standard-2"` | no |
 | <a name="input_static_ip"></a> [static\_ip](#input\_static\_ip) | Optional pre-configured static IP for HPC Frontend. | `string` | `""` | no |
 | <a name="input_subnet"></a> [subnet](#input\_subnet) | Subnet in which to deploy HPC Frontend. | `string` | `""` | no |
+| <a name="input_terraform_state_bucket"></a> [terraform\_state\_bucket](#input\_terraform\_state\_bucket) | Name of the GCS bucket holding Terraform state for resources the front end<br/>provisions, created by the separate tf/state\_bucket root and passed in by<br/>deploy.sh. No default: silently falling back to local state would bring<br/>back the risk this bucket exists to remove. | `string` | n/a | yes |
 | <a name="input_webserver_hostname"></a> [webserver\_hostname](#input\_webserver\_hostname) | DNS Hostname for the webserver | `string` | `""` | no |
 | <a name="input_zone"></a> [zone](#input\_zone) | GCP Zone for HPC Frontend deployment. | `string` | n/a | yes |
 

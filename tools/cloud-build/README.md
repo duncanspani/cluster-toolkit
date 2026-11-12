@@ -15,3 +15,110 @@
 * `project-cleanup.yaml`: Cloud build config that performs a regular cleanup of
   resources in the test project.
 * `provision`: Terraform module that sets up CloudBuild triggers and schedule.
+
+## Kueue Lock Automation
+
+When creating a new test, you must request a test lock in your job definition (e.g., `test-locks/<test-name>: 1`).
+
+The pipeline uses `pre-commit` hooks to enforce and automate test lock registration:
+
+1. `validate_kueue_tests.py`: Ensures your test job requests a lock and auto-fixes the `cpu` and `memory` limits/requests if they are missing or non-standard.
+2. `generate_kueue_locks.py`: Automatically detects new locks requested in build files and appends them to the Kueue configurations in `daily-tests/blueprints/test-infra-kueue/configs/`.
+
+If the `generate-kueue-locks` hook modifies files during your commit, simply review the changes and run `git add` again.
+
+Newly generated locks are automatically applied to the test clusters in the CI pipeline whenever `terraform apply` is run in the `provision` module.
+
+### Local Testing with Kueue
+
+If you wish to test your new test build locally against the test clusters before pushing your code, you must first generate the Kueue configurations and then manually apply them. You can do this by running the following from the root of the repository:
+
+```bash
+pre-commit run validate-kueue-tests --all-files
+pre-commit run generate-kueue-locks --all-files
+
+cd tools/cloud-build/provision
+./apply_kueue_locks.sh
+```
+
+## Zone Stockout Handling and EXCLUDE_ZONES
+
+When integration tests experience GCP physical capacity exhaustion (e.g., Compute Engine Spot VM stockout or Managed Lustre storage exhaustion), `submit_and_monitor_kueue_job.sh` catches the failure, extracts the exhausted zone, and automatically injects `EXCLUDE_ZONES="<zone>"` into the test job manifest for the next retry attempt.
+
+If you need to proactively prevent a test from attempting specific zones on Attempt 1, you can define `EXCLUDE_ZONES` directly in your test's container environment or Cloud Build trigger:
+
+```yaml
+- name: EXCLUDE_ZONES
+  value: "us-west1-b europe-west2-c"
+```
+
+The retry harness will preserve any pre-existing exclusions and accumulate any additional exhausted zones on top of them during retries.
+
+## Unit Testing
+
+Unit tests for Cloud Build scripts (including zone discovery, stockout exclusion, and retry injection in `find_available_zone.sh` and `submit_and_monitor_kueue_job.sh`) are located in `tools/tests/test_cloud_build_zone_retry.py`.
+
+To run the unit tests:
+
+```bash
+python3 -m unittest tools/tests/test_cloud_build_zone_retry.py -v
+```
+
+## GCE Reservation Capacity Polling
+
+For integration tests that deploy against specific GCE hardware reservations, `wait_for_available_reservation.sh` validates reservation state and polls for available capacity before starting deployment:
+
+```bash
+bash /workspace/tools/cloud-build/wait_for_available_reservation.sh \
+  "<RESERVATION_NAME|RESOURCE_URI>" "<ZONE>" "[RESERVATION_OWNER_PROJECT]" "[REQUIRED_COUNT]" "[BLUEPRINT_FILE]"
+```
+
+For example, in `daily-tests/builds/gke-g4-confidential.yaml`:
+
+```bash
+bash /workspace/tools/cloud-build/wait_for_available_reservation.sh "g4-reservation-0" "us-south1-a" "hpc-toolkit-dev" 2 "\$$EXAMPLE_BP"
+```
+
+* If `AVAILABLE >= REQUIRED_COUNT`, it exits `0` immediately (and if `BLUEPRINT_FILE` and `RESERVATION_OWNER_PROJECT` are provided, injects `project: "<RESERVATION_OWNER_PROJECT>"` under `specific_reservations:`) to allow the test deployment to proceed.
+* If `AVAILABLE < REQUIRED_COUNT` (capacity is currently in use by another build), it retries every 5 minutes (up to 8 hours).
+* If the reservation is not in `READY` state, has `0` total capacity, or `TOTAL_COUNT < REQUIRED_COUNT`, it fails fast with exit code `3`.
+* If the reservation does not exist (`404`), lacks permissions (`403`), or fails authentication/validation (`400`/`401`), it fails fast with exit code `1`.
+
+## Unit Testing
+
+Unit tests for GCE reservation capacity polling (`wait_for_available_reservation.sh`) are located in `tools/tests/test_wait_for_available_reservation.py`.
+
+To run the unit tests:
+
+```bash
+python3 -m unittest tools/tests/test_wait_for_available_reservation.py -v
+```
+
+## Stale PR Build & Kueue Job Reaper
+
+The in-cluster `kueue-reaper` deployment on `test-kueue-cluster` (`kueue-reaper-pod.yaml`) runs `reap_stale_pr_builds.py` every 5 minutes:
+
+1. Lists ongoing (`QUEUED` and `WORKING`) Cloud Builds that carry a `_PR_NUMBER` substitution.
+2. Fetches the head SHA of every open PR with one paginated GitHub REST call (`GET /pulls?state=open`). Unauthenticated calls, `304 Not Modified` included, count against GitHub's 60 requests/hour per-IP limit; set `GITHUB_TOKEN` to raise it.
+3. Cancels builds whose commit is no longer the PR head, and builds of PRs that GitHub confirms are closed or merged. If GitHub or `gcloud` is unavailable, nothing is cancelled on that run.
+4. Once those Cloud Builds transition to `CANCELLED`, the same pod deletes the matching Kubernetes `Job`s so queued jobs leave Kueue and running pods receive `SIGTERM` to tear down their test infrastructure (`kueue_cleanup_pod.sh`).
+
+> **Note:** A build that a maintainer re-runs on an older commit of an open PR is cancelled on the next run, because it no longer matches the PR head.
+
+You can also invoke it manually as a CLI quick action (for a specific PR or across all open/closed PRs):
+
+```bash
+# Preview stale builds across all PRs without cancelling:
+python3 tools/cloud-build/reap_stale_pr_builds.py --project=hpc-toolkit-dev --dry-run
+
+# Cancel stale builds for a specific PR:
+python3 tools/cloud-build/reap_stale_pr_builds.py --project=hpc-toolkit-dev --pr=6550
+```
+
+> **Note:** To run this manually without `--dry-run`, your authenticated Google Cloud account needs permission to cancel builds (`roles/cloudbuild.builds.editor`).
+
+Unit tests for `reap_stale_pr_builds.py` are located in `tools/tests/test_reap_stale_pr_builds.py`:
+
+```bash
+python3 -m unittest tools/tests/test_reap_stale_pr_builds.py -v
+```

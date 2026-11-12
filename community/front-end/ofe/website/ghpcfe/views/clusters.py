@@ -28,6 +28,8 @@ from rest_framework.response import Response
 from django.shortcuts import render, get_object_or_404, redirect
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
+from datetime import timedelta
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.views import redirect_to_login
 from django.core.exceptions import ValidationError
@@ -457,6 +459,27 @@ class ClusterUpdateView(LoginRequiredMixin, UpdateView):
             form.add_error("login_node_disk_type", "Invalid Disk Type")
             return self.form_invalid(form)
 
+        # Reject controller/login machine types too small to run node setup.
+        # The OFE bootstrap (yum + ansible + spack) OOMs on ~2 GB nodes and dies
+        # silently, leaving the cluster stuck initializing. Require at least 4 GB.
+        min_ram_mb = 4096
+        for field_name, instance_type in [
+            ("controller_instance_type", self.object.controller_instance_type),
+            ("login_node_instance_type", self.object.login_node_instance_type),
+        ]:
+            try:
+                node_memory = machine_info[instance_type]["memory"]
+            except KeyError:
+                form.add_error(field_name, f"Invalid machine type {instance_type}")
+                return self.form_invalid(form)
+            if node_memory < min_ram_mb:
+                form.add_error(
+                    field_name,
+                    f"{instance_type} has {node_memory} MB RAM; at least "
+                    f"{min_ram_mb} MB is required for cluster node setup.",
+                )
+                return self.form_invalid(form)
+
         # Verify formset validity (surprised there's no method to do this)
         for formset, formset_name in [
             (mountpoints, "mountpoints"),
@@ -469,44 +492,121 @@ class ClusterUpdateView(LoginRequiredMixin, UpdateView):
                 form.add_error(None, f"Error in {formset_name} section")
                 return self.form_invalid(form)
 
-        # Get the existing MountPoint objects associated with the cluster
-        existing_mount_points = MountPoint.objects.filter(cluster=self.object)
+        # Check partition RAM before anything below is deleted; an unknown
+        # machine type is left to the partition checks in the transaction.
+        for part_form in partitions.forms:
+            part_data = part_form.cleaned_data
+            if not part_data or part_data.get("DELETE"):
+                continue
+            machine_type = part_data.get("machine_type")
+            node_memory = machine_info.get(machine_type, {}).get("memory")
+            if node_memory is not None and node_memory < min_ram_mb:
+                form.add_error(
+                    None,
+                    f"Partition {part_data.get('name')}: {machine_type} has "
+                    f"{node_memory} MB RAM; at least {min_ram_mb} MB is "
+                    "required for compute node setup.",
+                )
+                return self.form_invalid(form)
 
-        # Iterate through the existing mount points and check if they are in the updated formset
-        for mount_point in existing_mount_points:
-            if not any(mount_point_form.instance == mount_point for mount_point_form in mountpoints.forms):
-                # The mount point is not in the updated formset, so delete it
-                mount_point_path = mount_point.mount_path
-                mount_point_id = mount_point.pk
-                logger.info(f"Deleting mount point: {mount_point_path}, ID: {mount_point_id}")
-                mount_point.delete()
+        # Spack must live on a shared filesystem so compute nodes can see it.
+        # If no mount point covers the configured spack directory, the cluster
+        # would deploy "ready" but every Spack operation would fail on the
+        # compute nodes. Require some mount point to be a prefix of spackdir.
+        spackdir = self.object.spackdir
+        mount_paths = [
+            mp_form.cleaned_data.get("mount_path")
+            for mp_form in mountpoints.forms
+            if mp_form.cleaned_data
+            and not mp_form.cleaned_data.get("DELETE", False)
+            and mp_form.cleaned_data.get("mount_path")
+        ]
+        if not any(
+            spackdir == mp or spackdir.startswith(mp.rstrip("/") + "/")
+            for mp in mount_paths
+        ):
+            form.add_error(
+                None,
+                f"The spack directory ({spackdir}) is not on any shared mount "
+                "point. Add a mount point whose path is a parent of the spack "
+                "directory, or change the spack directory.",
+            )
+            return self.form_invalid(form)
 
-       # Get the existing ClusterPartition objects associated with the cluster
-        existing_partitions = ClusterPartition.objects.filter(cluster=self.object)
-
-        logger.info(f"Processing total {len(partitions.forms)} partition forms.")
-        logger.info(f"Existing number of partitions is {len(partitions.forms)}.")
-
-        for partition in existing_partitions:
-            #logger.info(f"Checking existing partition: {partition.name}")
-            found = False
-            for partition_form in partitions.forms:
-                #logger.info(f"Checking form for partition: {partition_form.instance.name}")
-                if partition_form.instance == partition:
-                    found = True
-                    delete_status = partition_form.cleaned_data.get('DELETE', False)
-                    if delete_status:
-                        # Log the intent to delete then delete the partition
-                        logger.info(f"Partition: {partition.name} (ID: {partition.pk}) marked for deletion.")
-                        partition.delete()
-                    else:
-                        logger.info(f"No deletion requested for existing partition: {partition.name}.")
-            if not found:
-                # Log if no corresponding form was found for the partition
-                logger.info(f"No form found for Partition: {partition.name}.")
+        # Cluster nodes have no external IP, so during bootstrap they reach the
+        # control bucket (Google APIs) and package mirrors only through Private
+        # Google Access or a Cloud NAT. A subnet with neither leaves every node
+        # stuck with no route out and the cluster stuck initialising with no
+        # error. Managed VPCs get a NAT, but an imported subnet may have
+        # neither, so validate before deploying. The probe fails open: a
+        # subnet we cannot read (or an API error) does not block the deploy.
+        subnet = self.object.subnet
+        egress = None
+        if subnet:
+            try:
+                egress = cloud_info.get_subnet_egress_info(
+                    "GCP",
+                    self.object.cloud_credential.detail,
+                    subnet.cloud_region,
+                    subnet.cloud_id,
+                )
+            except Exception as e:  # noqa: BLE001 - never block deploy on a probe error
+                logger.warning("Subnet egress check failed, allowing deploy: %s", e)
+                egress = None
+        if (
+            egress
+            and egress["found"]
+            and not (egress["private_google_access"] or egress["cloud_nat"])
+        ):
+            form.add_error(
+                None,
+                f"The selected subnet ({subnet.cloud_id}) has neither Private "
+                "Google Access nor a Cloud NAT, so cluster nodes cannot reach "
+                "Google APIs or package mirrors and setup would hang. Enable "
+                "Private Google Access on the subnet or add a Cloud NAT in "
+                f"region {subnet.cloud_region}, then try again.",
+            )
+            return self.form_invalid(form)
 
         try:
             with transaction.atomic():
+                # Deletes run in the transaction so a validation error undoes them.
+                # Get the existing MountPoint objects associated with the cluster
+                existing_mount_points = MountPoint.objects.filter(cluster=self.object)
+
+                # Iterate through the existing mount points and check if they are in the updated formset
+                for mount_point in existing_mount_points:
+                    if not any(mount_point_form.instance == mount_point for mount_point_form in mountpoints.forms):
+                        # The mount point is not in the updated formset, so delete it
+                        mount_point_path = mount_point.mount_path
+                        mount_point_id = mount_point.pk
+                        logger.info(f"Deleting mount point: {mount_point_path}, ID: {mount_point_id}")
+                        mount_point.delete()
+
+                # Get the existing ClusterPartition objects associated with the cluster
+                existing_partitions = ClusterPartition.objects.filter(cluster=self.object)
+
+                logger.info(f"Processing total {len(partitions.forms)} partition forms.")
+                logger.info(f"Existing number of partitions is {len(partitions.forms)}.")
+
+                for partition in existing_partitions:
+                    #logger.info(f"Checking existing partition: {partition.name}")
+                    found = False
+                    for partition_form in partitions.forms:
+                        #logger.info(f"Checking form for partition: {partition_form.instance.name}")
+                        if partition_form.instance == partition:
+                            found = True
+                            delete_status = partition_form.cleaned_data.get('DELETE', False)
+                            if delete_status:
+                                # Log the intent to delete then delete the partition
+                                logger.info(f"Partition: {partition.name} (ID: {partition.pk}) marked for deletion.")
+                                partition.delete()
+                            else:
+                                logger.info(f"No deletion requested for existing partition: {partition.name}.")
+                    if not found:
+                        # Log if no corresponding form was found for the partition
+                        logger.info(f"No form found for Partition: {partition.name}.")
+
                 self.object = form.save()
 
                 mountpoints.instance = self.object
@@ -1020,7 +1120,6 @@ class BackendReconfigureCluster(BackendAsyncView):
 
     def cmd(self, unused_task_id, unused_token, cluster):
         ci = ClusterInfo(cluster)
-        ci.update()
         ci.reconfigure_cluster()
 
     async def get(self, request, pk):
@@ -1120,15 +1219,31 @@ class BackendSyncCluster(LoginRequiredMixin, generic.View):
 class BackendClusterStatus(LoginRequiredMixin, generic.View):
     """Backend handler for cluster syncing"""
 
+    # A controller that never reports "ready" leaves the cluster on
+    # "initialising" forever. If it has been initialising longer than this,
+    # surface a likely-failed-setup warning instead of spinning silently.
+    INIT_STALL_MINUTES = 45
+
     def get(self, request, pk, *args, **kwargs):
         """
         This handles GET request with parameter pk.
-        for example: /backend/cluster-status/50 
+        for example: /backend/cluster-status/50
         """
         cluster = get_object_or_404(Cluster, pk=pk)
         logger.info(f"Current cluster {pk} status: {cluster.status}")
 
-        return JsonResponse({'status': cluster.status})
+        payload = {"status": cluster.status}
+        if cluster.status == "i" and cluster.initialization_started:
+            elapsed = timezone.now() - cluster.initialization_started
+            if elapsed > timedelta(minutes=self.INIT_STALL_MINUTES):
+                payload["stalled"] = True
+                payload["message"] = (
+                    "This cluster has been initialising for over "
+                    f"{self.INIT_STALL_MINUTES} minutes. Setup may have failed "
+                    "on the controller. Check View Logs; you may need to "
+                    "delete and retry the cluster."
+                )
+        return JsonResponse(payload)
 
 
 class BackendAuthUserGCP(BackendAsyncView):

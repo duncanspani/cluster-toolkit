@@ -24,12 +24,15 @@ controller_node: "{{ slurm_cluster_name }}-controller"
 network: "{{ test_name }}"
 # Skipping nccl_test_path for now as it uses ramble
 sub_network: "{{ deployment_name }}-sub-0"
+scheduler: "slurm"
+chs_partitions: "a4x"
 post_deploy_tests:
 - test-validation/test-mounts.yml
 - test-validation/test-partitions.yml
 - test-validation/test-default-partition.yml
 - test-validation/test-enroot.yml
 - test-validation/test-gpus-slurm.yml
+- test-validation/test-chs.yml
 # Skipping test-nccl.yml for now
 post_destroy_tasks:
 - post-destroy-tasks/delete-image.yml
@@ -44,6 +47,6 @@ cli_deployment_vars:
   test_name: "{{ test_name }}"
   region: "{{ region }}"
   zone: "{{ zone }}"
-  a4x_reservation_name: "nvidia-gb200-uyrez5en64cu7"
+  a4x_reservation_name: "nvidia-gb200-jlr31fm12d525"
   slurm_cluster_name: "{{ slurm_cluster_name }}"
   a4x_cluster_size: 2

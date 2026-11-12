@@ -20,25 +20,35 @@ locals {
   cluster_location = local.cluster_id_parts[3]
   project_id       = var.project_id != null ? var.project_id : local.cluster_id_parts[1]
   enable_pathways  = var.enable_pathways_for_tpus || var.kueue.enable_pathways_for_tpus
+  enable_slicing   = var.kueue.enable_dynamic_slicing_for_tpus
 
-  kueue_default_config_template = local.enable_pathways ? "${path.module}/kueue/kueue-configuration-pathways.yaml.tftpl" : ""
+  kueue_default_config_template = lookup({
+    "true-true"  = "${path.module}/kueue/kueue-configuration-dynamic-slicing-pathways.yaml.tftpl",
+    "false-true" = "${path.module}/kueue/kueue-configuration-dynamic-slicing.yaml.tftpl",
+    "true-false" = "${path.module}/kueue/kueue-configuration-pathways.yaml.tftpl",
+  }, "${local.enable_pathways}-${local.enable_slicing}", "")
+
 
   kueue_config_template_vars = merge(
     {
-      pathways_cpu_quota    = 480
-      pathways_memory_quota = "2000G"
-      tpu_quota             = "999999" # Default high value if not set
+      namespace               = "default"
+      pathways_cpu_quota      = 480
+      pathways_memory_quota   = "2000G"
+      tpu_flavor_cpu_quota    = "999999" # High default to avoid limiting TPU pods by CPU
+      tpu_flavor_memory_quota = "999999T"
+      tpu_quota               = "999999" # Default high value if not set
+      tpu_topology            = ""
     },
     var.kueue.config_template_vars != null ? var.kueue.config_template_vars : {}
   )
 
-  kueue_default_config_content = local.kueue_default_config_template != "" ? (
+  kueue_default_config_content = (local.install_kueue && local.kueue_user_config_content == "" && local.kueue_default_config_template != "") ? (
     endswith(local.kueue_default_config_template, ".tftpl") ?
     templatefile(local.kueue_default_config_template, local.kueue_config_template_vars) :
     file(local.kueue_default_config_template)
   ) : ""
 
-  kueue_user_config_content = var.kueue.config_path != "" && var.kueue.config_path != null ? (
+  kueue_user_config_content = (local.install_kueue && var.kueue.config_path != "" && var.kueue.config_path != null) ? (
     endswith(var.kueue.config_path, ".tftpl") || (var.kueue.config_template_vars != null && length(var.kueue.config_template_vars) > 0) ?
     templatefile(var.kueue.config_path, local.kueue_config_template_vars) :
     file(var.kueue.config_path)
@@ -50,7 +60,7 @@ locals {
   webhook_wait_duration = "60s"
 
   asapd_lite_config_content = (
-    var.asapd_lite.config_path != null && var.asapd_lite.config_path != "" ?
+    local.install_asapd_lite && var.asapd_lite.config_path != null && var.asapd_lite.config_path != "" ?
     (
       endswith(var.asapd_lite.config_path, ".tftpl") || (var.asapd_lite.config_template_vars != null && length(var.asapd_lite.config_template_vars) > 0) ?
       templatefile(var.asapd_lite.config_path, var.asapd_lite.config_template_vars != null ? var.asapd_lite.config_template_vars : {}) :
@@ -102,8 +112,12 @@ locals {
   manifest_names = {
     for index, manifest in local.enabled_manifests : index =>
     trim(replace(lower(
-      (try(manifest.name, null) != null ? manifest.name :
-        "${substr((manifest.source != null && manifest.source != "") ? replace(basename(manifest.source), "/(\\.(tftpl|yaml|yml))+$/", "") : "${var.module_id}-raw", 0, 30)}-${substr(sha1(jsonencode(manifest)), 0, 7)}"
+      (try(coalesce(manifest.name, ""), "") != "" ? manifest.name :
+        "${substr((try(manifest.source, null) != null && manifest.source != "") ? replace(basename(manifest.source), "/(\\.(tftpl|yaml|yml))+$/", "") : "${var.module_id}-raw", 0, 30)}-${substr(sha1(join("|", [
+          try(manifest.source != null ? manifest.source : "", ""),
+          try(manifest.content != null ? manifest.content : "", ""),
+          join(",", try(keys(manifest.template_vars), []))
+        ])), 0, 7)}-${index}"
       )
     ), "/[^a-z0-9-]+/", "-"), "-")
   }
@@ -116,11 +130,11 @@ locals {
         # Step A: Use the fetched body if it's a URL
         contains(keys(local.url_manifests), tostring(index)) ? data.http.manifest_from_url[tostring(index)].body :
 
-        # Step B: Process directory files 
+        # Step B: Process directory files
         contains(keys(local.directory_manifests), index) ? (
           join("\n---\n", [
             # Use union() to combine the results of fileset (which are sets)
-            for f in union(
+            for f in setunion(
               fileset(manifest.source, "*.yaml"),
               fileset(manifest.source, "*.yml"),
               fileset(manifest.source, "*.tftpl")
@@ -146,13 +160,48 @@ locals {
     }
   })
 
-  install_kueue             = try(var.kueue.install, false)
-  install_cert_manager      = try(var.cert_manager.install, false)
-  install_jobset            = try(var.jobset.install, false)
-  install_gpu_operator      = try(var.gpu_operator.install, false)
-  install_nvidia_dra_driver = try(var.nvidia_dra_driver.install, false)
-  install_gib               = try(var.gib.install, false)
-  install_asapd_lite        = try(var.asapd_lite.install, false)
+  install_kueue                    = try(var.kueue.install, false)
+  install_cert_manager             = try(var.cert_manager.install, false)
+  install_jobset                   = try(var.jobset.install, false)
+  install_gpu_operator             = try(var.gpu_operator.install, false)
+  install_nvidia_dra_driver        = try(var.nvidia_dra_driver.install, false)
+  install_gib                      = try(var.gib.install, false)
+  install_asapd_lite               = try(var.asapd_lite.install, false)
+  install_checkpoint_configuration = var.enable_multi_tier_checkpointing && var.checkpoint_configuration != null
+
+  jobset_controller_cpu    = try(var.jobset.controller_cpu, null) != null ? var.jobset.controller_cpu : (local.enable_slicing ? "4" : null)
+  jobset_controller_memory = try(var.jobset.controller_memory, null) != null ? var.jobset.controller_memory : (local.enable_slicing ? "16Gi" : null)
+
+  kueue_controller_cpu      = try(var.kueue.controller_cpu, null) != null ? var.kueue.controller_cpu : (local.enable_slicing ? "16" : null)
+  kueue_controller_memory   = try(var.kueue.controller_memory, null) != null ? var.kueue.controller_memory : (local.enable_slicing ? "64Gi" : null)
+  kueue_controller_replicas = try(var.kueue.controller_replicas, null) != null ? var.kueue.controller_replicas : (local.enable_slicing ? 3 : null)
+
+  kueue_enable_wait_for_pods_ready = (
+    module.kueue_pods_ready_default_on_check.is_greater_than_or_equal &&
+    (var.kueue.wait_for_pods_ready != null || local.enable_pathways)
+  )
+  kueue_pods_ready_recovery_timeout = (
+    try(var.kueue.wait_for_pods_ready.recovery_timeout, null) != null ?
+    var.kueue.wait_for_pods_ready.recovery_timeout :
+    (local.enable_pathways && module.kueue_pods_ready_default_on_check.is_greater_than_or_equal ? "0s" : null)
+  )
+  kueue_wait_for_pods_ready = local.kueue_enable_wait_for_pods_ready ? merge(
+    { timeout = coalesce(try(var.kueue.wait_for_pods_ready.timeout, null), "30m") },
+    local.kueue_pods_ready_recovery_timeout != null ? { recoveryTimeout = local.kueue_pods_ready_recovery_timeout } : {},
+    try(var.kueue.wait_for_pods_ready.block_admission, null) != null ? { blockAdmission = var.kueue.wait_for_pods_ready.block_admission } : {}
+  ) : null
+}
+
+module "kueue_pods_ready_default_on_check" {
+  source          = "../../internal/semver_compare"
+  current_version = var.kueue.version
+  minimum_version = "0.19.0"
+}
+
+module "kueue_dra_version_check" {
+  source          = "../../internal/semver_compare"
+  current_version = var.kueue.version
+  minimum_version = "0.18.0"
 }
 
 data "http" "manifest_from_url" {
@@ -177,7 +226,7 @@ module "kubectl_apply_manifests" {
   chart_name    = "${path.module}/raw-config-chart"
   chart_version = "0.1.0"
   namespace     = each.value.namespace
-  atomic        = true
+  atomic        = each.value.wait_for_rollout
   wait          = each.value.wait_for_rollout
   timeout       = 1200
   values_yaml = [
@@ -201,19 +250,51 @@ module "install_kueue" {
   create_namespace = true
   values_yaml = compact([
     file("${path.module}/kueue/kueue-helm-values.yaml"),
-    var.kueue.controller_cpu != null || var.kueue.controller_memory != null || var.kueue.controller_replicas != null ? yamlencode({
+    local.kueue_wait_for_pods_ready != null ? yamlencode({
+      managerConfig = {
+        controllerManagerConfigYaml = yamlencode(merge(
+          yamldecode(file("${path.module}/kueue/kueue-manager-config.yaml")),
+          { waitForPodsReady = local.kueue_wait_for_pods_ready }
+        ))
+      }
+    }) : "",
+    local.kueue_controller_cpu != null || local.kueue_controller_memory != null || local.kueue_controller_replicas != null || module.kueue_dra_version_check.is_greater_than_or_equal ? yamlencode({
       controllerManager = merge(
-        var.kueue.controller_replicas != null ? { replicas = var.kueue.controller_replicas } : {},
-        var.kueue.controller_cpu != null || var.kueue.controller_memory != null ? {
+        module.kueue_dra_version_check.is_greater_than_or_equal ? {
+          featureGates = [
+            {
+              name    = "TopologyAwareScheduling"
+              enabled = true
+            },
+            {
+              name    = "KueueDRAIntegration"
+              enabled = false
+            },
+            {
+              name    = "KueueDRARejectWorkloadsWhenDRADisabled"
+              enabled = false
+            },
+            {
+              name    = "KueueDRAIntegrationExtendedResource"
+              enabled = false
+            },
+            {
+              name    = "KueueDRAIntegrationPartitionableDevices"
+              enabled = false
+            }
+          ]
+        } : {},
+        local.kueue_controller_replicas != null ? { replicas = local.kueue_controller_replicas } : {},
+        local.kueue_controller_cpu != null || local.kueue_controller_memory != null ? {
           manager = {
             resources = {
               requests = merge(
-                var.kueue.controller_cpu != null ? { cpu = var.kueue.controller_cpu } : {},
-                var.kueue.controller_memory != null ? { memory = var.kueue.controller_memory } : {}
+                local.kueue_controller_cpu != null ? { cpu = local.kueue_controller_cpu } : {},
+                local.kueue_controller_memory != null ? { memory = local.kueue_controller_memory } : {}
               )
               limits = merge(
-                var.kueue.controller_cpu != null ? { cpu = var.kueue.controller_cpu } : {},
-                var.kueue.controller_memory != null ? { memory = var.kueue.controller_memory } : {}
+                local.kueue_controller_cpu != null ? { cpu = local.kueue_controller_cpu } : {},
+                local.kueue_controller_memory != null ? { memory = local.kueue_controller_memory } : {}
               )
             }
           }
@@ -227,7 +308,7 @@ module "install_kueue" {
   depends_on = [var.gke_cluster_exists]
 }
 
-# This sleep ensures that subsequent configuration of Kueue custom resources 
+# This sleep ensures that subsequent configuration of Kueue custom resources
 # do not fail due to the webhook not being available.
 resource "time_sleep" "wait_for_webhook" {
   count           = local.install_kueue ? 1 : 0
@@ -268,16 +349,16 @@ module "install_jobset" {
   create_namespace = true
   values_yaml = compact([
     file("${path.module}/jobset/jobset-helm-values.yaml"),
-    var.jobset.controller_cpu != null || var.jobset.controller_memory != null ? yamlencode({
+    local.jobset_controller_cpu != null || local.jobset_controller_memory != null ? yamlencode({
       controller = {
         resources = {
           requests = merge(
-            var.jobset.controller_cpu != null ? { cpu = var.jobset.controller_cpu } : {},
-            var.jobset.controller_memory != null ? { memory = var.jobset.controller_memory } : {}
+            local.jobset_controller_cpu != null ? { cpu = local.jobset_controller_cpu } : {},
+            local.jobset_controller_memory != null ? { memory = local.jobset_controller_memory } : {}
           )
           limits = merge(
-            var.jobset.controller_cpu != null ? { cpu = var.jobset.controller_cpu } : {},
-            var.jobset.controller_memory != null ? { memory = var.jobset.controller_memory } : {}
+            local.jobset_controller_cpu != null ? { cpu = local.jobset_controller_cpu } : {},
+            local.jobset_controller_memory != null ? { memory = local.jobset_controller_memory } : {}
           )
         }
       }
@@ -476,4 +557,60 @@ resource "kubernetes_annotations" "sa_patch" {
   annotations = {
     "iam.gke.io/gcp-service-account" = each.value.gcp_service_account_email
   }
+}
+
+module "install_slice_controller" {
+  source        = "./helm_install"
+  count         = local.enable_slicing ? 1 : 0
+  release_name  = "slice-controller"
+  chart_name    = "${path.module}/raw-config-chart"
+  chart_version = "0.1.0"
+  wait          = true
+
+  values_yaml = [
+    yamlencode({
+      manifests = [templatefile("${path.module}/kueue/slice-controller.yaml.tftpl", {
+        cpu_request    = var.kueue.slice_controller_cpu_request
+        memory_request = var.kueue.slice_controller_memory_request
+        cpu_limit      = var.kueue.slice_controller_cpu_limit
+        memory_limit   = var.kueue.slice_controller_memory_limit
+      })]
+    })
+  ]
+
+  depends_on = [var.gke_cluster_exists, module.configure_kueue, module.install_jobset]
+}
+
+locals {
+  checkpoint_configuration_manifest = !local.install_checkpoint_configuration ? "" : yamlencode({
+    apiVersion = "checkpointing.gke.io/v1"
+    kind       = "CheckpointConfiguration"
+    metadata   = { name = coalesce(var.checkpoint_configuration.name, "default") }
+    # Unset and empty optional fields are left out of the spec.
+    spec = { for k, v in {
+      cloudStorageBucketName = var.checkpoint_configuration.cloud_storage_bucket_name
+      inMemoryVolumeSize     = var.checkpoint_configuration.in_memory_volume_size
+      nodeSelector           = var.checkpoint_configuration.node_selector
+      tolerations            = var.checkpoint_configuration.tolerations == null ? null : [for t in var.checkpoint_configuration.tolerations : { for tk, tv in t : tk => tv if tv != null }]
+      gcsFuseMountOptions    = var.checkpoint_configuration.gcs_fuse_mount_options
+    } : k => v if v != null && length(v) > 0 }
+  })
+}
+
+# The manifest hash in release_name replaces the release on any spec change, so the
+# CheckpointConfiguration is re-created: GKE does not apply in-place updates to the driver.
+module "install_checkpoint_configuration" {
+  source        = "./helm_install"
+  count         = local.install_checkpoint_configuration ? 1 : 0
+  release_name  = "checkpoint-configuration-${substr(sha256(local.checkpoint_configuration_manifest), 0, 8)}"
+  chart_name    = "${path.module}/raw-config-chart"
+  chart_version = "0.1.0"
+  wait          = true
+  depends_on    = [var.gke_cluster_exists]
+
+  values_yaml = [
+    yamlencode({
+      manifests = [local.checkpoint_configuration_manifest]
+    })
+  ]
 }

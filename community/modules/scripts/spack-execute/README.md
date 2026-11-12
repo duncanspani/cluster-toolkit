@@ -43,7 +43,7 @@ To see a full example of this module in use, see the [hpc-slurm-gromacs.yaml] ex
 
 ### Using with `startup-script` module
 
-The `spack-runner` output can be used by the `startup-script` module.
+The `spack_runner` output can be used by the `startup-script` module.
 
 ```yaml
   - id: spack-setup
@@ -60,7 +60,7 @@ The `spack-runner` output can be used by the `startup-script` module.
     source: modules/scripts/startup-script
     settings:
       runners:
-      - $(spack-build.spack-runner)
+      - $(spack-build.spack_runner)
       - type: shell
         destination: "my-script.sh"
         content: echo 'hello world'
@@ -91,7 +91,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_local"></a> [local](#requirement\_local) | >= 2.0.0 |
 
 ## Providers

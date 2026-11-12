@@ -18,6 +18,8 @@ Possible causes could be [insufficient quota](#insufficient-quota),
 for the service account attached to the controller. Also see the
 [Slurm user guide](https://docs.google.com/document/u/1/d/e/2PACX-1vS0I0IcgVvby98Rdo91nUjd7E9u83oIMCM4arne-9_IdBg6BdV1lBpUcSje_PyHcbAaErC1rY7p4u1g/pub).
 
+> **Note on Automated GCP Constraints:** If batch jobs (`sbatch`) encounter GCP Quota or Capacity (Stockout) failures, they will be automatically requeued. To prevent these failures from aggressively retrying and hammering the GCP API, the Cluster Toolkit directly applies a randomized `StartTime` delay (1-2 minutes) to the job. During this random delay/jitter, the job will wait in a `PENDING` state. Interactive `srun` jobs fail immediately.
+
 #### Insufficient Quota
 
 It may be that you have sufficient quota to deploy your cluster but insufficient
@@ -32,11 +34,11 @@ $ cat /var/log/slurm/resume.log
 resume.py ERROR: ... "Quota 'C2_CPUS' exceeded. Limit: 300.0 in region europe-west4.". Details: "[{'message': "Quota 'C2_CPUS' exceeded. Limit: 300.0 in region europe-west4.", 'domain': 'usageLimits', 'reason': 'quotaExceeded'}]">
 ```
 
-The solution here is to [request more of the specified quota](#gcp-quotas),
+The solution here is to [request more of the specified quota](https://cloud.google.com/compute/quotas),
 `C2 CPUs` in the example above. Alternatively, you could switch the partition's
 [machine type][partition-machine-type], to one which has sufficient quota.
 
-[partition-machine-type]: community/modules/compute/schedmd-slurm-gcp-v6-nodeset/README.md#input_machine_type
+[partition-machine-type]: ../community/modules/compute/schedmd-slurm-gcp-v6-nodeset/README.md#input_machine_type
 
 #### Insufficient Capacity
 
@@ -55,9 +57,9 @@ One example of an error message which appears in `resume.log` due to insufficien
 bulkInsert operation errors: VM_MIN_COUNT_NOT_REACHED
 ```
 
-When this happens, the the output of `sacct` will show the job's status as `NODE_FAIL`.
+When this happens, the output of `sacct` will show the job's status as `NODE_FAIL`.
 
-Jobs submitted via `srun` will not be requeued, however jobs submitted via `sbatch` will be requeued.
+Jobs submitted via `srun` will not be requeued, however jobs submitted via `sbatch` will be requeued with a random delay/jitter (1-2 minutes).
 
 #### Placement Groups (Slurm)
 
@@ -85,7 +87,7 @@ to `false` on the partition in question.
 If VMs get stuck in `status: staging` when using the `vm-instance` module with
 placement enabled, it may be because you need to allow terraform to make more
 concurrent requests. See
-[this note](modules/compute/vm-instance/README.md#placement) in the vm-instance
+[this note](../modules/compute/vm-instance/README.md#placement) in the vm-instance
 README.
 
 #### Insufficient Service Account Permissions
@@ -157,8 +159,8 @@ After creating the service account, it can be set via the
 
 [def-compute-sa]: https://cloud.google.com/compute/docs/access/service-accounts#default_service_account
 [slurm-on-gcp-ug]: https://goo.gle/slurm-gcp-user-guide
-[slurm-on-gcp-con]: community/modules/scheduler/schedmd-slurm-gcp-v6-controller/README.md
-[slurm-on-gcp-login]: community/modules/scheduler/schedmd-slurm-gcp-v6-login/README.md
+[slurm-on-gcp-con]: ../community/modules/scheduler/schedmd-slurm-gcp-v6-controller/README.md
+[slurm-on-gcp-login]: ../community/modules/scheduler/schedmd-slurm-gcp-v6-login/README.md
 
 ### Timeout Error / Startup Script Failure (Slurm V6)
 
@@ -209,9 +211,9 @@ the `local_mount` and `filestore_share_name`.
 
 ### `local-exec provisioner error` During Terraform Apply
 
-Using the `enable_reconfigure` setting with Slurm v6 modules uses `local-exec`
-provisioners to perform additional cluster configuration. Some common issues
-experienced when using this feature are missing local python requirements and
-incorrectly configured gcloud cli. There is more information about these issues
-and fixes on the
-[`schedmd-slurm-gcp-v6-controller` documentation](../community/modules/scheduler/schedmd-slurm-gcp-v6-controller/README.md#live-cluster-reconfiguration-enable_reconfigure).
+Slurm v6 modules use destroy-time `local-exec` provisioners (`enable_cleanup_compute`,
+default `true`) that call the local `gcloud` CLI to clean up compute nodes and resource
+policies during `terraform destroy` (or during `apply` when a nodeset is removed or
+replaced). Ensure `gcloud` is installed and authenticated, or see the
+[`schedmd-slurm-gcp-v6-controller` documentation](../community/modules/scheduler/schedmd-slurm-gcp-v6-controller/README.md#live-cluster-reconfiguration)
+for current configuration options.

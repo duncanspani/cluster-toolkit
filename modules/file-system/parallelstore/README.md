@@ -1,7 +1,7 @@
 > [!WARNING]
-> This module is deprecated and will be removed on August 31, 2026. The
+> This module is deprecated (deprecation date: August 31, 2026) and will be removed in a future release. The
 > recommended replacement is the
-> [GCP Managed Lustre module](../managed-lustre/README.md)
+> [GCP Managed Lustre module](../managed-lustre/README.md).
 
 ## Description
 
@@ -42,7 +42,7 @@ For parallelstore instance, Below snippet creates new VPC and configures private
 for this newly created network.
 
 ```yaml
- - id: network
+  - id: network
     source: modules/network/vpc
 
   # Private Service Access (PSA) requires the compute.networkAdmin role which is
@@ -110,9 +110,10 @@ Use `daos_agent_config` to provide additional configuration for `daos_agent`, fo
 - id: parallelstorefs
   source: modules/file-system/pre-existing-network-storage
   settings:
-    daos_agent_config: |
-      credential_config:
-        cache_expiration: 1m
+    parallelstore_options:
+      daos_agent_config: |
+        credential_config:
+          cache_expiration: 1m
 ```
 
 Use `dfuse_environment` to provide additional environment variables for `dfuse` process, for example:
@@ -146,7 +147,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 6.13.0 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | ~> 3.0 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
@@ -184,6 +185,8 @@ No modules.
 | <a name="input_import_gcs_bucket_uri"></a> [import\_gcs\_bucket\_uri](#input\_import\_gcs\_bucket\_uri) | The name of the GCS bucket to import data from to parallelstore. | `string` | `null` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels to add to parallel store instance. | `map(string)` | `{}` | no |
 | <a name="input_local_mount"></a> [local\_mount](#input\_local\_mount) | The mount point where the contents of the device may be accessed after mounting. | `string` | `"/parallelstore"` | no |
+| <a name="input_local_mount_owner"></a> [local\_mount\_owner](#input\_local\_mount\_owner) | Local mount owner, string in format <user>:<group>. | `string` | `""` | no |
+| <a name="input_local_mount_permissions"></a> [local\_mount\_permissions](#input\_local\_mount\_permissions) | Local mount permissions, specified as mode according to chmod(2). | `string` | `""` | no |
 | <a name="input_mount_options"></a> [mount\_options](#input\_mount\_options) | Options describing various aspects of the parallelstore instance. | `string` | `"disable-wb-cache,thread-count=16,eq-count=8"` | no |
 | <a name="input_name"></a> [name](#input\_name) | Name of parallelstore instance. | `string` | `null` | no |
 | <a name="input_network_id"></a> [network\_id](#input\_network\_id) | The ID of the GCE VPC network to which the instance is connected given in the format:<br/>`projects/<project_id>/global/networks/<network_name>`" | `string` | n/a | yes |

@@ -33,7 +33,7 @@ vars:
   num_slices:
 
   # Machine type
-  machine_type: ct6e-standard-4t
+  compute_machine_type: ct6e-standard-4t
 
   # The TPU placement topology for pod slice node pool.
   tpu_topology:
@@ -43,8 +43,16 @@ vars:
   # To allow only your IP address, use <YOUR-IP-ADDRESS>/32
   authorized_cidr:
 
-  # The name of the compute engine reservation of TPU v6e nodes
-  reservation:
+  # Consumption model variables
+  spot: false
+  reservation_affinity: {consume_reservation_type: "NO_RESERVATION", specific_reservations: []}
+  enable_flex_start: false
+  auto_repair: true
+  enable_queued_provisioning: false
+  autoscaling_min_node_count: $(null)
+  autoscaling_max_node_count: $(null)
+  autoscaling_total_min_nodes: 0
+  kueue_configuration_path: $(null)
 
   system_node_pool_disk_size_gb: 200
   v6e_node_pool_disk_size_gb: 100
@@ -55,9 +63,6 @@ vars:
 
   # Accelerator type for Kueue configuration
   accelerator_type: tpu-v6e-slice
-
-  # Kueue configuration
-  kueue_configuration_path: $(ghpc_stage("./kueue-configuration.yaml.tftpl"))
 
   # The namespace to be configured for running workloads
   user_namespace: default
@@ -77,6 +82,10 @@ vars:
 
   # # Maximum throughput of the lustre instance in MBps per TiB
   # per_unit_storage_throughput: 500
+
+  # Optional overrides (defaults shown)
+  # Machine type for the GKE system node pool.
+  system_node_pool_machine_type: n2d-standard-8
 
 
 deployment_groups:
@@ -99,24 +108,6 @@ deployment_groups:
           ip_cidr_range: 10.0.32.0/20
       firewall_rules:
       - name: $(vars.deployment_name)-internal-0
-        ranges: [192.168.0.0/16]
-        allow:
-        - protocol: tcp
-          ports: ["0-65535"]
-        - protocol: udp
-          ports: ["0-65535"]
-        - protocol: icmp
-
-  - id: gke-tpu-v6e-net-1
-    source: modules/network/vpc
-    settings:
-      network_name: $(vars.deployment_name)-net-1
-      subnetworks:
-      - subnet_name: $(vars.deployment_name)-sub-1
-        subnet_region: $(vars.region)
-        subnet_ip: 192.168.64.0/18
-      firewall_rules:
-      - name: $(vars.deployment_name)-internal-1
         ranges: [192.168.0.0/16]
         allow:
         - protocol: tcp
@@ -168,33 +159,38 @@ deployment_groups:
       random_suffix: true
       force_destroy: false
       enable_hierarchical_namespace: true
+      object_users:
+        mtc_sa: $(gke-tpu-v6e-cluster.mtc_service_account_member)
+    outputs: [gcs_bucket_name]
 
   - id: gke-tpu-v6e-cluster
     source: modules/scheduler/gke-cluster
     use: [gke-tpu-v6e-net-0, workload_service_account]
     settings:
-      system_node_pool_machine_type: "n2-standard-8"
+      system_node_pool_machine_type: $(vars.system_node_pool_machine_type)
       system_node_pool_disk_size_gb: $(vars.system_node_pool_disk_size_gb)
       system_node_pool_taints: []
       enable_private_endpoint: false # Allows access from authorized public IPs
       enable_pathways_for_tpus: $(vars.enable_pathways_for_tpus)
+      enable_dataplane_v2: true
+      enable_private_ipv6_google_access: false
       configure_workload_identity_sa: true
+      enable_ml_diagnostics: true
       namespace: $(vars.user_namespace)
       enable_filestore_csi: true
       enable_gcsfuse_csi: true
+      enable_multi_tier_checkpointing: true
       enable_managed_lustre_csi: true
       enable_persistent_disk_csi: true # enable Hyperdisk for the cluster
       master_authorized_networks:
       - cidr_block: $(vars.authorized_cidr) # Allows your machine to run the kubectl command. Required for multi network setup.
         display_name: "kubectl-access-network"
-      additional_networks: $(gke-tpu-v6e-net-1.instance_additional_networks)
       # Cluster versions cannot be updated through the toolkit after creation
       # Please manage cluster version from the Google Cloud Console directly
       version_prefix: $(vars.version_prefix)
       release_channel: REGULAR
       maintenance_exclusions:
       - name: no-minor-or-node-upgrades-indefinite
-        start_time: "2025-12-01T00:00:00Z"
         exclusion_scope: NO_MINOR_OR_NODE_UPGRADES
         exclusion_end_time_behavior: UNTIL_END_OF_SUPPORT
     outputs: [instructions]
@@ -206,15 +202,19 @@ deployment_groups:
       num_slices: $(vars.num_slices)
       name: gke-tpu-v6e-pool
       disk_type: hyperdisk-balanced
-      machine_type: $(vars.machine_type)
+      machine_type: $(vars.compute_machine_type)
       auto_upgrade: true
+      enable_dranet: true
       zones: [$(vars.zone)]
       disk_size_gb: $(vars.v6e_node_pool_disk_size_gb)
-      additional_networks: $(gke-tpu-v6e-net-1.instance_additional_networks)
-      reservation_affinity:
-        consume_reservation_type: SPECIFIC_RESERVATION
-        specific_reservations:
-        - name: $(vars.reservation)
+      spot: $(vars.spot)
+      reservation_affinity: $(vars.reservation_affinity)
+      enable_flex_start: $(vars.enable_flex_start)
+      auto_repair: "$(vars.enable_flex_start ? false : vars.auto_repair)"
+      enable_queued_provisioning: $(vars.enable_queued_provisioning)
+      autoscaling_min_node_count: $(vars.autoscaling_min_node_count)
+      autoscaling_max_node_count: $(vars.autoscaling_max_node_count)
+      autoscaling_total_min_nodes: $(vars.autoscaling_total_min_nodes)
       placement_policy:
         type: COMPACT
         tpu_topology: $(vars.tpu_topology)
@@ -273,23 +273,26 @@ deployment_groups:
         install: true
         config_path: $(vars.kueue_configuration_path)
         config_template_vars:
-          tpu_quota: $(vars.num_slices * gke-tpu-v6e-pool.node_count_static * gke-tpu-v6e-pool.tpu_chips_per_node)
+          tpu_quota: '$(vars.num_slices * (vars.enable_flex_start ? vars.autoscaling_max_node_count : gke-tpu-v6e-pool.node_count_static) * gke-tpu-v6e-pool.tpu_chips_per_node)'
           accelerator_type: $(vars.accelerator_type)
+          tpu_topology: $(vars.tpu_topology)
           namespace: $(vars.user_namespace)
       jobset:
         install: true
       cert_manager:
         install: true
+      checkpoint_configuration:
+        in_memory_volume_size: "50Gi"
+        cloud_storage_bucket_name: $(checkpoint_bucket.gcs_bucket_name)
+        node_selector:
+          node.kubernetes.io/instance-type: $(vars.compute_machine_type)
+        tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
 
-  - id: gke-ml-diagnostics
-    source: modules/management/mldiagnostics
-    use: [gke-tpu-v6e-cluster, workload-manager-install]
-    outputs: [instructions]
-
-  # When utilizing GCS Fuse Storage Profiles, you must ensure the GKE Service Agent
-  # possesses the 'gke.gcsfuse.profileUser' custom IAM role assigned out-of-band.
-  # Please refer to 'modules/file-system/gke-persistent-volume/README.md' for instructions.
-  # Persistent Volume for training data using GCS Fuse Storage Profile
+  # Persistent Volume for training data using GCS Fuse Storage Profile.
+  # For shared buckets or custom IAM roles, see modules/file-system/gke-persistent-volume/README.md
   - id: training-pv
     source: modules/file-system/gke-persistent-volume
     use: [training_bucket, gke-tpu-v6e-cluster]
@@ -311,7 +314,8 @@ deployment_groups:
     source: modules/compute/gke-job-template
     use: [checkpointing-pv, training-pv, gke-tpu-v6e-pool]
     settings:
-      node_count: $(gke-tpu-v6e-pool.node_count_static)
+      name: gcsfuse-fio-job
+      node_count: '$(vars.enable_flex_start ? vars.autoscaling_max_node_count : gke-tpu-v6e-pool.node_count_static)'
       security_context:  # to make sure the job have enough access to install the fio packages
       - key: runAsUser
         value: 0

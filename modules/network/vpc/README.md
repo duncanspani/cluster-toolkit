@@ -17,21 +17,23 @@ Toolkit][cft]. We recommend following the [documentation for the network
 module][cft-network] and [submodules][cft-network-submodules] for more details.
 In particular, the detailed structure of input variables can be found for:
 
-* [var.firewall\_rules](https://github.com/terraform-google-modules/terraform-google-network/tree/v5.1.0/modules/firewall-rules#inputs)
-* [var.secondary\_ranges](https://github.com/terraform-google-modules/terraform-google-network/tree/v5.1.0/modules/subnets#inputs)
+* [var.firewall\_rules](https://github.com/terraform-google-modules/terraform-google-network/tree/v18.3.0/modules/firewall-rules#inputs)
+* [var.secondary\_ranges](https://github.com/terraform-google-modules/terraform-google-network/tree/v18.3.0/modules/subnets#inputs)
 
 [vpc]: https://cloud.google.com/vpc
 [router]: https://github.com/terraform-google-modules/terraform-google-cloud-router
 [nat]: https://github.com/terraform-google-modules/terraform-google-cloud-nat
 [iap]: https://cloud.google.com/iap
 [cft]: https://cloud.google.com/foundation-toolkit
-[cft-network]: https://github.com/terraform-google-modules/terraform-google-network/tree/v5.1.0
-[cft-network-submodules]: https://github.com/terraform-google-modules/terraform-google-network/tree/v5.1.0/modules
+[cft-network]: https://github.com/terraform-google-modules/terraform-google-network/tree/v18.3.0
+[cft-network-submodules]: https://github.com/terraform-google-modules/terraform-google-network/tree/v18.3.0/modules
 
-Additionally, [Google Private Access][gpa] is enabled by default on all
-subnetworks unless it is explicitly disabled. This setting ensures that all VMs
-can use Google services such as [Cloud Storage][gcs] even if they do not have
-public IP addresses or Cloud NAT is disabled.
+Additionally, [Google Private Access][gpa] is enabled by default on the
+default primary subnetwork (when `var.subnetworks` is not overridden). When
+providing custom entries in `var.subnetworks`, set `subnet_private_access: true`
+explicitly on each subnetwork entry that requires Private Google Access so VMs
+can use Google services such as [Cloud Storage][gcs] without public IP
+addresses or Cloud NAT.
 
 [gpa]: https://cloud.google.com/vpc/docs/private-google-access
 [gcs]: https://cloud.google.com/storage
@@ -49,12 +51,12 @@ This creates a new VPC network named `cluster-net`.
 
 ### Deprecation warning
 
-The variables listed below have been deprecated and will be removed in a future
-release. Until they are removed,You may continue to use them in Toolkit
-blueprints with the same functionality as documented in the [Toolkit 1.0
-release][vpc1.0].
+The variables listed below are deprecated and rejected by variable validation
+(`var.<name> == null`). Blueprints must migrate to `var.subnetworks` and
+`var.default_primary_subnetwork_size` as documented below (see [Toolkit 1.0
+release][vpc1.0] for legacy definitions).
 
-* Deprecated variables
+* Deprecated variables (no longer accepted)
   * `var.primary_subnetwork`
   * `var.additional_subnetworks`
   * `var.subnetwork_size`
@@ -114,7 +116,7 @@ compact set of subnetworks possible.
 > recalculated for each subnetwork. We advise appending new subnetworks to the end
 > of `var.subnetworks`.
 
-[cftsubnets]: https://github.com/terraform-google-modules/terraform-google-network/tree/v5.1.0/modules/subnets
+[cftsubnets]: https://github.com/terraform-google-modules/terraform-google-network/tree/v18.3.0/modules/subnets
 
 ### SSH Access
 
@@ -163,7 +165,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 
 ## Providers
 
@@ -175,9 +177,9 @@ limitations under the License.
 
 | Name | Source | Version |
 | ---- | ------ | ------- |
-| <a name="module_cloud_router"></a> [cloud\_router](#module\_cloud\_router) | terraform-google-modules/cloud-router/google | ~> 7.3 |
-| <a name="module_nat_ip_addresses"></a> [nat\_ip\_addresses](#module\_nat\_ip\_addresses) | terraform-google-modules/address/google | ~> 4.1 |
-| <a name="module_vpc"></a> [vpc](#module\_vpc) | terraform-google-modules/network/google | ~> 13.0 |
+| <a name="module_cloud_router"></a> [cloud\_router](#module\_cloud\_router) | terraform-google-modules/cloud-router/google | ~> 9.1 |
+| <a name="module_nat_ip_addresses"></a> [nat\_ip\_addresses](#module\_nat\_ip\_addresses) | terraform-google-modules/address/google | ~> 5.1 |
+| <a name="module_vpc"></a> [vpc](#module\_vpc) | terraform-google-modules/network/google | ~> 18.3 |
 
 ## Resources
 
@@ -198,6 +200,7 @@ limitations under the License.
 | <a name="input_deployment_name"></a> [deployment\_name](#input\_deployment\_name) | The name of the current deployment | `string` | n/a | yes |
 | <a name="input_enable_cloud_nat"></a> [enable\_cloud\_nat](#input\_enable\_cloud\_nat) | Enable the creation of Cloud NATs. | `bool` | `true` | no |
 | <a name="input_enable_cloud_router"></a> [enable\_cloud\_router](#input\_enable\_cloud\_router) | Enable the creation of a Cloud Router for your VPC. For more information on Cloud Routers see https://cloud.google.com/network-connectivity/docs/router/concepts/overview | `bool` | `true` | no |
+| <a name="input_enable_dynamic_port_allocation"></a> [enable\_dynamic\_port\_allocation](#input\_enable\_dynamic\_port\_allocation) | Enable Dynamic Port Allocation on Cloud NAT so VMs dynamically allocate between min\_ports\_per\_vm and max\_ports\_per\_vm. | `bool` | `true` | no |
 | <a name="input_enable_iap_rdp_ingress"></a> [enable\_iap\_rdp\_ingress](#input\_enable\_iap\_rdp\_ingress) | Enable a firewall rule to allow Windows Remote Desktop Protocol access using IAP tunnels | `bool` | `false` | no |
 | <a name="input_enable_iap_ssh_ingress"></a> [enable\_iap\_ssh\_ingress](#input\_enable\_iap\_ssh\_ingress) | Enable a firewall rule to allow SSH access using IAP tunnels | `bool` | `true` | no |
 | <a name="input_enable_iap_winrm_ingress"></a> [enable\_iap\_winrm\_ingress](#input\_enable\_iap\_winrm\_ingress) | Enable a firewall rule to allow Windows Remote Management (WinRM) access using IAP tunnels | `bool` | `false` | no |
@@ -207,9 +210,12 @@ limitations under the License.
 | <a name="input_firewall_log_config"></a> [firewall\_log\_config](#input\_firewall\_log\_config) | Firewall log configuration for Toolkit firewall rules (var.enable\_iap\_ssh\_ingress and others) | `string` | `"DISABLE_LOGGING"` | no |
 | <a name="input_firewall_rules"></a> [firewall\_rules](#input\_firewall\_rules) | List of firewall rules | `any` | `[]` | no |
 | <a name="input_internal_ipv6_range"></a> [internal\_ipv6\_range](#input\_internal\_ipv6\_range) | When enabling IPv6 ULA, optionally specify a /48 from fd20::/20 (default null) | `string` | `null` | no |
-| <a name="input_ips_per_nat"></a> [ips\_per\_nat](#input\_ips\_per\_nat) | The number of IP addresses to allocate for each regional Cloud NAT (set to 0 to disable NAT). The number of NAT IPs depend on the port reservation allocated for each node and the number of ports that a single NAT IP can serve. Refer this documentation for more details: https://cloud.google.com/nat/docs/ports-and-addresses#port-reservation-examples | `number` | `2` | no |
+| <a name="input_ips_per_nat"></a> [ips\_per\_nat](#input\_ips\_per\_nat) | The number of static IP addresses to allocate for each regional Cloud NAT when nat\_ip\_allocate\_option is MANUAL\_ONLY (set to 0 to disable NAT unless nat\_ip\_allocate\_option is AUTO\_ONLY). Refer this documentation for more details: https://cloud.google.com/nat/docs/ports-and-addresses#port-reservation-examples | `number` | `2` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels to add to network resources that support labels. Key-value pairs of strings. | `map(string)` | `{}` | no |
+| <a name="input_max_ports_per_vm"></a> [max\_ports\_per\_vm](#input\_max\_ports\_per\_vm) | Maximum number of ports allocated to a VM from Cloud NAT when enable\_dynamic\_port\_allocation is true. Must be a power of 2 between 64 and 65536 and greater than min\_ports\_per\_vm. | `number` | `1024` | no |
+| <a name="input_min_ports_per_vm"></a> [min\_ports\_per\_vm](#input\_min\_ports\_per\_vm) | Minimum number of ports allocated to a VM from Cloud NAT. If null, defaults to 32 when enable\_dynamic\_port\_allocation is true, and 64 when false. | `number` | `null` | no |
 | <a name="input_mtu"></a> [mtu](#input\_mtu) | The network MTU (default: 8896). Recommended values: 0 (use Compute Engine default), 1460 (default outside HPC environments), 1500 (Internet default), or 8896 (for Jumbo packets). Allowed are all values in the range 1300 to 8896, inclusively. | `number` | `8896` | no |
+| <a name="input_nat_ip_allocate_option"></a> [nat\_ip\_allocate\_option](#input\_nat\_ip\_allocate\_option) | How external IPs should be allocated for Cloud NAT ("MANUAL\_ONLY" or "AUTO\_ONLY"). Defaults to "MANUAL\_ONLY" using ips\_per\_nat static IPs when null. | `string` | `null` | no |
 | <a name="input_network_address_range"></a> [network\_address\_range](#input\_network\_address\_range) | IP address range (CIDR) for global network | `string` | `"10.0.0.0/9"` | no |
 | <a name="input_network_description"></a> [network\_description](#input\_network\_description) | An optional description of this resource (changes will trigger resource destroy/create) | `string` | `""` | no |
 | <a name="input_network_name"></a> [network\_name](#input\_network\_name) | The name of the network to be created (if unsupplied, will default to "{deployment\_name}-net") | `string` | `null` | no |

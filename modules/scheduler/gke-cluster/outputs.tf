@@ -76,6 +76,15 @@ locals {
           --project ${var.project_id}
     EOT
   )
+
+  mldiagnostics_message = !var.enable_ml_diagnostics ? "" : trimspace(
+    <<-EOT
+      ML Diagnostics has been configured:
+        - Namespace '${var.namespace}' has been labeled 'managed-mldiagnostics-gke: "true"' to enable webhook injection.
+        - Ensure workloads run in the '${var.namespace}' namespace.
+        - Ensure your workload pods use the Kubernetes Service Account configured with Workload Identity: '${local.k8s_service_account_name}'.
+    EOT
+  )
 }
 
 output "instructions" {
@@ -89,6 +98,8 @@ output "instructions" {
       ${local.kubernetes_cluster_fetch_credential_message}
 
       ${local.kubernetes_service_account_message}
+
+      ${local.mldiagnostics_message}
     EOT
   )
 }
@@ -131,4 +142,41 @@ output "cluster_endpoint" {
 output "cluster_ca_certificate" {
   description = "The base64 encoded public certificate authority data for the GKE cluster."
   value       = google_container_cluster.gke_cluster.master_auth[0].cluster_ca_certificate
+}
+
+output "enable_confidential_nodes" {
+  description = "Indicates whether Confidential Nodes are enabled at the cluster level."
+  value       = var.enable_confidential_nodes
+}
+
+output "confidential_instance_type" {
+  description = "The type of technology used by the confidential nodes."
+  value       = var.confidential_instance_type
+}
+
+output "enable_confidential_storage" {
+  description = "Indicates whether Confidential Storage is enabled at the cluster level."
+  value       = var.enable_confidential_storage
+}
+
+output "boot_disk_kms_key" {
+  description = "The Customer Managed Encryption Key (CMEK) used to encrypt the boot disks of the GKE nodes."
+  value       = var.boot_disk_kms_key
+}
+
+output "node_service_account" {
+  description = "The GCP Service Account email used by the GKE node pools."
+  value       = local.sa_email
+}
+
+output "mtc_service_account_member" {
+  description = "Workload Identity Federation principal of the Multi-Tier Checkpointing (MTC) driver's Kubernetes service account. Grant it object access on the MTC checkpoint bucket; it is only used when enable_multi_tier_checkpointing is true."
+  # Referencing the cluster's workload pool makes IAM grants on this principal
+  # wait for the cluster, which creates the pool in a new project.
+  value = "principal://iam.googleapis.com/projects/${data.google_project.project.number}/locations/global/workloadIdentityPools/${google_container_cluster.gke_cluster.workload_identity_config[0].workload_pool}/subject/ns/gke-managed-checkpointing/sa/gke-checkpointing-multitier-node"
+}
+
+output "enable_multi_tier_checkpointing" {
+  description = "Indicates whether High Scale Checkpointing (Multi-Tier Checkpointing) is enabled."
+  value       = var.enable_multi_tier_checkpointing
 }

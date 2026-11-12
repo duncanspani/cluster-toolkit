@@ -19,7 +19,14 @@ locals {
   labels = merge(var.labels, { ghpc_module = "gke-cluster", ghpc_role = "scheduler" })
 }
 
+resource "time_static" "exclusion_start" {
+  count = length(var.maintenance_exclusions) > 0 ? 1 : 0
+}
+
 locals {
+  # Inference Gateway retains its existing prerequisites.
+  enable_gateway_api = var.enable_gateway_api || var.enable_inference_gateway
+
   upgrade_settings = {
     strategy        = var.upgrade_settings.strategy
     max_surge       = coalesce(var.upgrade_settings.max_surge, 0)
@@ -46,23 +53,29 @@ locals {
   # multi networking needs enabled Dataplane v2
   derived_enable_dataplane_v2 = coalesce(var.enable_dataplane_v2, local.derived_enable_multi_networking)
 
-  default_monitoring_component = [
-    "SYSTEM_COMPONENTS",
-    "POD",
-    "DAEMONSET",
-    "DEPLOYMENT",
-    "STATEFULSET",
-    "STORAGE",
-    "HPA",
-    "CADVISOR",
-    "KUBELET",
-    "JOBSET"
-  ]
-
   default_logging_component = [
     "SYSTEM_COMPONENTS",
     "WORKLOADS"
   ]
+
+  # Check if n4-standard-4 is present across all target system node pool zones
+  n4_available_in_catalog = length(local.target_system_node_pool_zones) > 0 && alltrue([
+    for z in local.target_system_node_pool_zones : length(data.google_compute_machine_types.available_system_machines[z].machine_types) > 0
+  ])
+
+  # Choose the default based on confidential mode and N4 catalog availability:
+  # 1. If confidential nodes are enabled, default to n2d-standard-4 (Confidential VM support).
+  # 2. Otherwise, if n4-standard-4 is in the catalog, default to n4-standard-4 (Gen 4 primary).
+  # 3. If n4-standard-4 is not in the catalog, fall back to n2d-standard-4 (E2-less fallback).
+  default_system_node_pool_machine_type = var.enable_confidential_nodes ? "n2d-standard-4" : (
+    local.n4_available_in_catalog ? "n4-standard-4" : "n2d-standard-4"
+  )
+  # Fallback to the default if the user left it null
+  system_node_pool_machine_type = coalesce(var.system_node_pool_machine_type, local.default_system_node_pool_machine_type)
+  # Choose default disk type based on confidential storage mode.
+  # If enable_confidential_storage is false, we default to null to let GKE use its standard default boot disk.
+  # This avoids generating a Terraform diff (e.g. pd-standard -> pd-balanced) and triggering recreation of the system node pool on existing clusters.
+  system_node_pool_disk_type = var.system_node_pool_disk_type != null ? var.system_node_pool_disk_type : (var.enable_confidential_storage ? "hyperdisk-balanced" : null)
 }
 
 # GKE Node Auto-Provisioning (NAP) locals
@@ -100,6 +113,26 @@ data "google_project" "project" {
   project_id = var.project_id
 }
 
+data "google_compute_zones" "available" {
+  project = var.project_id
+  region  = var.region
+}
+
+locals {
+  target_system_node_pool_zones = var.system_node_pool_machine_type != null ? [] : toset(
+    var.system_node_pool_zones != null ? var.system_node_pool_zones : (
+      var.cluster_availability_type == "ZONAL" ? (var.zone != null ? [var.zone] : []) : data.google_compute_zones.available.names
+    )
+  )
+}
+
+data "google_compute_machine_types" "available_system_machines" {
+  for_each = local.target_system_node_pool_zones
+  project  = var.project_id
+  zone     = each.value
+  filter   = "name = \"n4-standard-4\""
+}
+
 data "google_container_engine_versions" "version_prefix_filter" {
   provider       = google-beta
   location       = var.cluster_availability_type == "ZONAL" ? var.zone : var.region
@@ -107,7 +140,14 @@ data "google_container_engine_versions" "version_prefix_filter" {
 }
 
 locals {
-  master_version = var.min_master_version != null ? var.min_master_version : data.google_container_engine_versions.version_prefix_filter.latest_master_version
+  latest_master_version  = data.google_container_engine_versions.version_prefix_filter.latest_master_version
+  latest_channel_version = lookup(data.google_container_engine_versions.version_prefix_filter.release_channel_latest_version, var.release_channel, local.latest_master_version)
+  master_version = var.min_master_version != null ? var.min_master_version : (
+    var.release_channel != "UNSPECIFIED" ? local.latest_channel_version : local.latest_master_version
+  )
+
+  mldiagnostics_minimum_version            = "1.35.0-gke.3065000"
+  high_scale_checkpointing_minimum_version = "1.32.4-gke.1415000"
 }
 
 
@@ -115,6 +155,31 @@ module "slice_controller_version_check" {
   source          = "../../internal/semver_compare"
   current_version = local.master_version
   minimum_version = "1.35.0-gke.274500"
+}
+
+module "mldiagnostics_version_check" {
+  source          = "../../internal/semver_compare"
+  current_version = local.master_version
+  minimum_version = local.mldiagnostics_minimum_version
+}
+
+module "high_scale_checkpointing_version_check" {
+  source          = "../../internal/semver_compare"
+  current_version = local.master_version
+  minimum_version = local.high_scale_checkpointing_minimum_version
+}
+
+resource "terraform_data" "validate_high_scale_checkpointing_version" {
+  lifecycle {
+    precondition {
+      condition     = !var.enable_multi_tier_checkpointing || module.high_scale_checkpointing_version_check.is_greater_than_or_equal
+      error_message = "GKE-managed High Scale Checkpointing (MTC) requires a GKE version of ${local.high_scale_checkpointing_minimum_version} or higher. Please update 'version_prefix' or 'min_master_version'."
+    }
+    precondition {
+      condition     = !var.enable_multi_tier_checkpointing || var.enable_gcsfuse_csi
+      error_message = "The variable 'enable_gcsfuse_csi' must be set to true when 'enable_multi_tier_checkpointing' is enabled."
+    }
+  }
 }
 
 resource "google_container_cluster" "gke_cluster" {
@@ -155,7 +220,7 @@ resource "google_container_cluster" "gke_cluster" {
     gcp_public_cidrs_access_enabled = var.gcp_public_cidrs_access_enabled
   }
 
-  private_ipv6_google_access = var.enable_private_ipv6_google_access ? "PRIVATE_IPV6_GOOGLE_ACCESS_TO_GOOGLE" : null
+  private_ipv6_google_access = var.enable_private_ipv6_google_access ? "PRIVATE_IPV6_GOOGLE_ACCESS_TO_GOOGLE" : "PRIVATE_IPV6_GOOGLE_ACCESS_DISABLED"
   default_max_pods_per_node  = var.default_max_pods_per_node
   master_auth {
     client_certificate_config {
@@ -215,15 +280,17 @@ resource "google_container_cluster" "gke_cluster" {
 
   enable_multi_networking = local.derived_enable_multi_networking
 
+  enable_fqdn_network_policy = var.enable_fqdn_network_policy
+
   network_policy {
     # Enabling NetworkPolicy for clusters with DatapathProvider=ADVANCED_DATAPATH
     # is not allowed. Dataplane V2 will take care of network policy enforcement
     # instead.
-    enabled = false
+    enabled = try(var.network_policy.enabled, false)
     # GKE Dataplane V2 support. This must be set to PROVIDER_UNSPECIFIED in
     # order to let the datapath_provider take effect.
     # https://github.com/terraform-google-modules/terraform-google-kubernetes-engine/issues/656#issuecomment-720398658
-    provider = "PROVIDER_UNSPECIFIED"
+    provider = try(var.network_policy.provider, "PROVIDER_UNSPECIFIED")
   }
 
   private_cluster_config {
@@ -249,7 +316,7 @@ resource "google_container_cluster" "gke_cluster" {
   }
 
   dynamic "gateway_api_config" {
-    for_each = var.enable_inference_gateway ? [1] : []
+    for_each = local.enable_gateway_api ? [1] : []
     content {
       channel = "CHANNEL_STANDARD"
     }
@@ -268,15 +335,18 @@ resource "google_container_cluster" "gke_cluster" {
   min_master_version = local.master_version
 
   maintenance_policy {
-    daily_maintenance_window {
-      start_time = var.maintenance_start_time
+    dynamic "daily_maintenance_window" {
+      for_each = var.maintenance_start_time != null ? [1] : []
+      content {
+        start_time = var.maintenance_start_time
+      }
     }
 
     dynamic "maintenance_exclusion" {
       for_each = var.maintenance_exclusions
       content {
         exclusion_name = maintenance_exclusion.value.name
-        start_time     = maintenance_exclusion.value.start_time
+        start_time     = coalesce(maintenance_exclusion.value.start_time, time_static.exclusion_start[0].rfc3339)
         end_time       = maintenance_exclusion.value.end_time
         exclusion_options {
           scope             = maintenance_exclusion.value.exclusion_scope
@@ -303,6 +373,12 @@ resource "google_container_cluster" "gke_cluster" {
     gcs_fuse_csi_driver_config {
       enabled = var.enable_gcsfuse_csi
     }
+    dynamic "high_scale_checkpointing_config" {
+      for_each = var.enable_multi_tier_checkpointing ? [1] : []
+      content {
+        enabled = true
+      }
+    }
     gce_persistent_disk_csi_driver_config {
       enabled = var.enable_persistent_disk_csi
     }
@@ -319,7 +395,7 @@ resource "google_container_cluster" "gke_cluster" {
       enabled = var.enable_managed_lustre_csi
     }
     dynamic "http_load_balancing" {
-      for_each = var.enable_inference_gateway ? [1] : []
+      for_each = local.enable_gateway_api ? [1] : []
       content {
         disabled = false
       }
@@ -327,12 +403,29 @@ resource "google_container_cluster" "gke_cluster" {
     slice_controller_config {
       enabled = var.enable_slice_controller
     }
+    network_policy_config {
+      disabled = !try(var.network_policy.enabled, false)
+    }
   }
+
+  # Emit the block only when enabled. The provider marks confidential_nodes
+  # ForceNew, so sending `enabled = false` to a cluster created without the
+  # block plans a full cluster replacement on every pre-existing cluster.
+  dynamic "confidential_nodes" {
+    for_each = var.enable_confidential_nodes ? [1] : []
+    content {
+      enabled                    = true
+      confidential_instance_type = var.confidential_instance_type
+    }
+  }
+
 
   timeouts {
     create = var.timeout_create
     update = var.timeout_update
+    delete = var.timeout_delete
   }
+
 
   dynamic "node_pool_defaults" {
     for_each = var.enable_gcfs ? [1] : []
@@ -346,6 +439,7 @@ resource "google_container_cluster" "gke_cluster" {
   }
 
   node_config {
+    machine_type = local.system_node_pool_machine_type
     shielded_instance_config {
       enable_secure_boot          = var.system_node_pool_enable_secure_boot
       enable_integrity_monitoring = true
@@ -363,6 +457,10 @@ resource "google_container_cluster" "gke_cluster" {
     ignore_changes = [
       node_config,
       min_master_version,
+      # Ignore unmanaged Fleet membership added out-of-band (e.g. Connect Gateway)
+      fleet,
+      # Ignore cluster-level node_locations on regional clusters to prevent fighting GKE regional zone defaults
+      node_locations,
     ]
     precondition {
       condition     = var.default_max_pods_per_node == null || var.networking_mode == "VPC_NATIVE"
@@ -383,10 +481,22 @@ resource "google_container_cluster" "gke_cluster" {
       )
       error_message = "The GKE Slice Controller requires a GKE version of 1.35.0-gke.274500 or higher. Please update 'version_prefix' or 'min_master_version'."
     }
+    precondition {
+      condition     = !(local.derived_enable_dataplane_v2 && try(var.network_policy.enabled, false))
+      error_message = "Enabling network policy (Calico) is not supported when GKE Dataplane V2 is enabled. Dataplane V2 automatically manages network policy enforcement."
+    }
+    precondition {
+      condition     = !var.enable_fqdn_network_policy || local.derived_enable_dataplane_v2
+      error_message = "FQDN Network Policy requires GKE Dataplane V2 to be enabled."
+    }
+    precondition {
+      condition     = !var.enable_confidential_nodes || can(regex("^(n2d-|c2d-|c3d?-|t2d-|g4-)", local.system_node_pool_machine_type))
+      error_message = "The system_node_pool_machine_type must be a confidential-compatible machine type (e.g., n2d, c2d, c3d, c3, t2d, g4) when enable_confidential_nodes is true."
+    }
   }
 
   monitoring_config {
-    enable_components = var.enable_dcgm_monitoring ? concat(local.default_monitoring_component, ["DCGM"]) : local.default_monitoring_component
+    enable_components = var.enable_dcgm_monitoring ? distinct(concat(var.monitoring_components, ["DCGM"])) : var.monitoring_components
     managed_prometheus {
       enabled = true
       auto_monitoring_config {
@@ -397,6 +507,13 @@ resource "google_container_cluster" "gke_cluster" {
 
   logging_config {
     enable_components = local.default_logging_component
+  }
+
+  dynamic "managed_machine_learning_diagnostics_config" {
+    for_each = var.enable_ml_diagnostics ? [1] : []
+    content {
+      enabled = true
+    }
   }
 }
 
@@ -430,13 +547,23 @@ resource "google_container_node_pool" "system_node_pools" {
   }
 
   node_config {
-    labels          = var.system_node_pool_kubernetes_labels
-    resource_labels = local.labels
-    service_account = var.service_account_email
-    oauth_scopes    = var.service_account_scopes
-    machine_type    = var.system_node_pool_machine_type
-    disk_size_gb    = var.system_node_pool_disk_size_gb
-    disk_type       = var.system_node_pool_disk_type
+    labels                      = var.system_node_pool_kubernetes_labels
+    resource_labels             = local.labels
+    service_account             = var.service_account_email
+    oauth_scopes                = var.service_account_scopes
+    machine_type                = local.system_node_pool_machine_type
+    disk_size_gb                = var.system_node_pool_disk_size_gb
+    disk_type                   = local.system_node_pool_disk_type
+    enable_confidential_storage = var.enable_confidential_storage
+    boot_disk_kms_key           = var.boot_disk_kms_key
+
+    dynamic "confidential_nodes" {
+      for_each = var.enable_confidential_nodes ? [1] : []
+      content {
+        enabled                    = true
+        confidential_instance_type = var.confidential_instance_type
+      }
+    }
 
     dynamic "taint" {
       for_each = var.system_node_pool_taints
@@ -476,9 +603,17 @@ resource "google_container_node_pool" "system_node_pools" {
     }
   }
 
+  timeouts {
+    create = var.timeout_create
+    update = var.timeout_update
+    delete = var.timeout_delete
+  }
+
   lifecycle {
     ignore_changes = [
       node_config[0].labels,
+      # Ignore resource_labels to prevent node pool replacement on blueprint/metadata renames
+      node_config[0].resource_labels,
       node_config[0].taint,
       version,
     ]
@@ -497,6 +632,23 @@ resource "google_container_node_pool" "system_node_pools" {
     precondition {
       condition     = local.upgrade_settings.max_unavailable > 0 || local.upgrade_settings.max_surge > 0
       error_message = "At least one of max_unavailable or max_surge must greater than 0"
+    }
+    precondition {
+      condition     = !var.enable_confidential_storage || (var.boot_disk_kms_key != null && var.boot_disk_kms_key != "")
+      error_message = "A valid boot_disk_kms_key must be provided when enable_confidential_storage is true to satisfy GKE Confidential Storage requirements."
+    }
+    precondition {
+      condition     = !var.enable_confidential_storage || (local.system_node_pool_disk_type != null && can(regex("^hyperdisk", local.system_node_pool_disk_type)))
+      error_message = "Confidential Storage (enable_confidential_storage = true) is only supported on Hyperdisks. Please set system_node_pool_disk_type to 'hyperdisk-balanced' or another hyperdisk type."
+    }
+    precondition {
+      # If confidential storage is disabled, and the disk type is hyperdisk, the machine family must support standard hyperdisk boot disks.
+      condition = (
+        var.enable_confidential_storage ||
+        !can(regex("^hyperdisk", coalesce(local.system_node_pool_disk_type, ""))) ||
+        !can(regex("^(n2d-|n2-|e2-|c2-|c2d-|t2d-|t2a-)", local.system_node_pool_machine_type))
+      )
+      error_message = "Standard Hyperdisk boot disks are not supported on machine type ${local.system_node_pool_machine_type} when enable_confidential_storage is false. Please set enable_confidential_storage to true, or use a standard persistent disk type (e.g., 'pd-balanced') for system_node_pool_disk_type."
     }
   }
 }
@@ -547,8 +699,16 @@ resource "google_container_node_pool" "cpu_np" {
     }
   }
 
+  timeouts {
+    create = var.timeout_create
+    update = var.timeout_update
+    delete = var.timeout_delete
+  }
+
   lifecycle {
     ignore_changes = [
+      # Ignore resource_labels to prevent node pool replacement on blueprint/metadata renames
+      node_config[0].resource_labels,
       version,
     ]
   }
@@ -566,10 +726,29 @@ resource "kubernetes_namespace" "user_namespace" {
   ]
 }
 
+resource "kubernetes_labels" "workload_namespace_labels" {
+  count       = var.enable_ml_diagnostics ? 1 : 0
+  api_version = "v1"
+  kind        = "Namespace"
+
+  metadata {
+    name = var.namespace
+  }
+
+  labels = {
+    "managed-mldiagnostics-gke" = "true"
+  }
+
+  depends_on = [
+    google_container_cluster.gke_cluster,
+    kubernetes_namespace.user_namespace
+  ]
+}
+
 module "workload_identity" {
   count   = var.configure_workload_identity_sa ? 1 : 0
   source  = "terraform-google-modules/kubernetes-engine/google//modules/workload-identity"
-  version = ">= 40.0"
+  version = ">= 46.0"
 
   use_existing_gcp_sa = true
   name                = var.k8s_service_account_name
@@ -615,6 +794,7 @@ module "kubectl_apply" {
   apply_manifests = concat(flatten([
     for idx, network_info in local.all_networks : [
       {
+        name   = length(network_info.name) <= 35 ? "netparam-${network_info.name}" : "netparam-${substr(network_info.name, 0, 29)}-${substr(sha1(network_info.name), 0, 5)}"
         source = "${path.module}/templates/gke-network-paramset.yaml.tftpl",
         template_vars = {
           name            = network_info.name,
@@ -624,6 +804,7 @@ module "kubectl_apply" {
         }
       },
       {
+        name          = length(network_info.name) <= 37 ? "netobj-${network_info.name}" : "netobj-${substr(network_info.name, 0, 31)}-${substr(sha1(network_info.name), 0, 5)}"
         source        = "${path.module}/templates/network-object.yaml.tftpl",
         template_vars = { name = network_info.name }
       }
@@ -631,9 +812,19 @@ module "kubectl_apply" {
     ]),
     var.enable_inference_gateway ? [
       {
+        name          = "inference-gateway"
         source        = "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v1.0.0/manifests.yaml",
         template_vars = {}
       }
     ] : []
   )
+}
+
+resource "terraform_data" "validate_ml_diagnostics_version" {
+  lifecycle {
+    precondition {
+      condition     = !var.enable_ml_diagnostics || module.mldiagnostics_version_check.is_greater_than_or_equal
+      error_message = "GKE-managed ML Diagnostics requires a GKE version of ${local.mldiagnostics_minimum_version} or higher. Please update 'version_prefix' or 'min_master_version'."
+    }
+  }
 }

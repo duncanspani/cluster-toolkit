@@ -29,12 +29,49 @@ data "google_compute_network_peering" "private_peering" {
 }
 
 locals {
-  server_ip        = split(":", google_lustre_instance.lustre_instance.mount_point)[0]
-  remote_mount     = split(":", google_lustre_instance.lustre_instance.mount_point)[1]
-  fs_type          = "lustre"
-  mount_options    = var.mount_options
-  instance_id      = var.name != null ? var.name : "${var.deployment_name}-${random_id.resource_name_suffix.hex}"
-  destination_path = "/"
+  server_ip                   = split(":", google_lustre_instance.lustre_instance.mount_point)[0]
+  remote_mount                = split(":", google_lustre_instance.lustre_instance.mount_point)[1]
+  fs_type                     = "lustre"
+  mount_options               = var.mount_options
+  instance_id                 = var.name != null ? var.name : "${var.deployment_name}-${random_id.resource_name_suffix.hex}"
+  destination_path            = "/"
+  per_unit_storage_throughput = var.enable_dynamic_tier ? null : coalesce(var.per_unit_storage_throughput, 500)
+
+  multinic_setup_script = file("${path.module}/scripts/multi-nic-lustre-setup.sh")
+
+  # Defines the cloud-init payload that provisions the Multi-NIC setup script,
+  # systemd service, and environment configuration on client nodes at boot.
+  # Built as a map and yamlencode'd to ensure `#cloud-config` stays on line 1.
+  multinic_cloud_config = merge({ create_hostname_file = true }, var.multinic.extra_cloud_config, {
+    write_files = concat(lookup(var.multinic.extra_cloud_config, "write_files", []), [
+      {
+        path        = "/usr/local/sbin/multi-nic-lustre-setup.sh"
+        permissions = "0755"
+        content     = local.multinic_setup_script
+      },
+      {
+        path        = "/etc/systemd/system/multi-nic-lustre.service"
+        permissions = "0644"
+        content     = file("${path.module}/files/multi-nic-lustre.service")
+      },
+      {
+        path        = "/etc/google/multinic-lustre.env"
+        permissions = "0644"
+        content = join("\n", [
+          "MULTINIC_LNET_OPTIONS=\"${var.multinic.lnet_options}\"",
+          "MULTINIC_TABLE_BASE=${var.multinic.table_base}",
+          "MULTINIC_RP_FILTER=${var.multinic.rp_filter}",
+          "",
+        ])
+      },
+    ])
+    runcmd = concat(lookup(var.multinic.extra_cloud_config, "runcmd", []), [
+      "systemctl daemon-reload",
+      "systemctl enable --now multi-nic-lustre.service",
+    ])
+  })
+
+  multinic_user_data = "#cloud-config\n${yamlencode(local.multinic_cloud_config)}"
 
   install_managed_lustre_client_runner = {
     "type"        = "shell"
@@ -67,13 +104,20 @@ resource "google_lustre_instance" "lustre_instance" {
 
   filesystem                  = var.remote_mount
   capacity_gib                = var.size_gib
-  per_unit_storage_throughput = var.per_unit_storage_throughput
+  per_unit_storage_throughput = local.per_unit_storage_throughput
 
   labels  = local.labels
   network = var.network_id
 
   gke_support_enabled = var.gke_support_enabled
-  kms_key             = var.kms_key
+  kms_key             = var.kms_key == "" ? null : var.kms_key
+
+  dynamic "dynamic_tier_options" {
+    for_each = var.enable_dynamic_tier ? [1] : []
+    content {
+      mode = "DEFAULT_CACHE"
+    }
+  }
 
   timeouts {
     create = "1h"
@@ -87,6 +131,14 @@ resource "google_lustre_instance" "lustre_instance" {
     precondition {
       condition     = data.google_compute_network_peering.private_peering.state == "ACTIVE"
       error_message = "The subnetwork that the lustre instance is hosted on must have private service access."
+    }
+    precondition {
+      condition     = !(var.enable_dynamic_tier && var.per_unit_storage_throughput != null)
+      error_message = "per_unit_storage_throughput must not be set when enable_dynamic_tier is enabled."
+    }
+    precondition {
+      condition     = !var.enable_dynamic_tier || (var.size_gib >= 472000 && var.size_gib % 472000 == 0)
+      error_message = "For Managed Lustre Dynamic Tier, size_gib must be at least 472000 (GiB) and must be in multiples of 472000."
     }
   }
 
@@ -102,4 +154,24 @@ resource "google_lustre_instance" "lustre_instance" {
       EOF
     interpreter = ["bash", "-c"]
   }
+}
+
+resource "google_compute_firewall" "lnet_callback_ingress" {
+  count   = var.multinic.enabled && var.multinic.create_firewall ? 1 : 0
+  name    = "${local.instance_id}-allow-lnet-callbacks"
+  project = var.project_id
+
+  # network_id is projects/<project>/global/networks/<name>
+  network = split("/", var.network_id)[4]
+
+  direction     = "INGRESS"
+  source_ranges = var.multinic.psa_ip_ranges
+
+  allow {
+    protocol = "tcp"
+    # GKE-compatible instances use LNet port 6988 instead of 988.
+    ports = [var.gke_support_enabled ? "6988" : "988", "1021-1023"]
+  }
+
+  target_tags = var.multinic.client_tags
 }

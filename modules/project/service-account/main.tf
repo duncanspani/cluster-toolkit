@@ -21,7 +21,7 @@ locals {
 
 module "service_account" {
   source  = "terraform-google-modules/service-accounts/google"
-  version = "~> 4.2"
+  version = "~> 5.1"
 
   billing_account_id = var.billing_account_id
   description        = local.description
@@ -34,4 +34,12 @@ module "service_account" {
   prefix             = var.deployment_name
   project_id         = var.project_id
   project_roles      = [for role in var.project_roles : "${var.project_id}=>roles/${role}"]
+}
+
+resource "time_sleep" "wait_for_service_account" {
+  create_duration = "30s"
+
+  depends_on = [
+    module.service_account
+  ]
 }

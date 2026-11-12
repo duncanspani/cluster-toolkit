@@ -44,7 +44,7 @@ import (
 
 const (
 	maxHintDist          int = 3 // Maximum Levenshtein distance where we suggest a hint
-	latestToolkitVersion     = "v1.91.0"
+	latestToolkitVersion     = "v1.108.0"
 	// SharedModulesDirName is the name of the shared directory for embedded modules
 	SharedModulesDirName = "_modules"
 )
@@ -260,12 +260,13 @@ type ModuleIDs []ModuleID
 
 // Module stores YAML definition of an HPC cluster component defined in a blueprint
 type Module struct {
-	Source   string
-	Kind     ModuleKind
-	ID       ModuleID
-	Use      ModuleIDs                 `yaml:"use,omitempty"`
-	Outputs  []modulereader.OutputInfo `yaml:"outputs,omitempty"`
-	Settings Dict                      `yaml:"settings,omitempty"`
+	Source             string
+	Kind               ModuleKind
+	ID                 ModuleID
+	Use                ModuleIDs                 `yaml:"use,omitempty"`
+	Outputs            []modulereader.OutputInfo `yaml:"outputs,omitempty"`
+	Settings           Dict                      `yaml:"settings,omitempty"`
+	ReconfigureIgnores map[string][]string       `yaml:"reconfigure_ignores,omitempty"`
 	// DEPRECATED fields, keep in the struct for backwards compatibility
 	RequiredApis     interface{} `yaml:"required_apis,omitempty"`
 	WrapSettingsWith interface{} `yaml:"wrapsettingswith,omitempty"`
@@ -276,12 +277,33 @@ func (m *Module) Clone() Module {
 	// copy slices
 	c.Use = slices.Clone(m.Use)
 	c.Outputs = slices.Clone(m.Outputs)
+	if m.ReconfigureIgnores != nil {
+		c.ReconfigureIgnores = make(map[string][]string, len(m.ReconfigureIgnores))
+		for k, v := range m.ReconfigureIgnores {
+			c.ReconfigureIgnores[k] = slices.Clone(v)
+		}
+	}
 	return c
+}
+
+// Info returns the ModuleInfo for the module without panicking.
+func (m Module) Info() (modulereader.ModuleInfo, error) {
+	if m.Source == "" {
+		return modulereader.ModuleInfo{}, EmptyModuleSource
+	}
+	kind := m.Kind.String()
+	if kind == "" {
+		kind = TerraformKind.String()
+	}
+	if kind != TerraformKind.String() && kind != PackerKind.String() {
+		return modulereader.ModuleInfo{}, InvalidModuleKind
+	}
+	return modulereader.GetModuleInfo(m.Source, kind)
 }
 
 // InfoOrDie returns the ModuleInfo for the module or panics
 func (m Module) InfoOrDie() modulereader.ModuleInfo {
-	mi, err := modulereader.GetModuleInfo(m.Source, m.Kind.String())
+	mi, err := m.Info()
 	if err != nil {
 		panic(err)
 	}
@@ -295,6 +317,7 @@ func (m Module) InfoOrDie() modulereader.ModuleInfo {
 type Blueprint struct {
 	BlueprintName            string      `yaml:"blueprint_name"`
 	GhpcVersion              string      `yaml:"ghpc_version,omitempty"`
+	AIAssisted               bool        `yaml:"ai_assisted,omitempty"`
 	Validators               []Validator `yaml:"validators,omitempty"`
 	ValidationLevel          int         `yaml:"validation_level,omitempty"`
 	Vars                     Dict
@@ -317,6 +340,9 @@ type Blueprint struct {
 	AddCreatorLabel bool `yaml:"-"`
 	// CreatorUsername is the username to use for the creator label
 	CreatorUsername string `yaml:"-"`
+	// subblockIO asks the user and saves sub-block maps chosen by gcluster
+	// (runtime-only, not serialized). Nil means read-only (gcluster expand).
+	subblockIO *SubblockIO
 }
 
 func (bp *Blueprint) Clone() Blueprint {
@@ -374,6 +400,7 @@ func (bp *Blueprint) visitDicts(cb func(dictPath, *Dict)) {
 
 // DeploymentSettings are deployment-specific override settings
 type DeploymentSettings struct {
+	AIAssisted               bool             `yaml:"ai_assisted,omitempty"`
 	TerraformBackendDefaults TerraformBackend `yaml:"terraform_backend_defaults,omitempty"`
 	Vars                     Dict
 }
@@ -1143,9 +1170,11 @@ func fetchExampleFilesFromGitHub(version string) []string {
 	if err == nil {
 		// Parse the remote tree
 		for _, item := range treeResp.Tree {
-			// Check for YAML files in the examples directories.
+			// Check for YAML files in the examples and daily tests directories.
 			if item.Type == "blob" &&
-				(strings.HasPrefix(item.Path, "examples/") || strings.HasPrefix(item.Path, "community/examples/")) &&
+				(strings.HasPrefix(item.Path, "examples/") ||
+					strings.HasPrefix(item.Path, "community/examples/") ||
+					strings.HasPrefix(item.Path, "tools/cloud-build/daily-tests/blueprints/")) &&
 				(strings.HasSuffix(item.Path, ".yaml") || strings.HasSuffix(item.Path, ".yml")) {
 
 				predefinedExamples = append(predefinedExamples, item.Path)
@@ -1236,4 +1265,35 @@ func worker(version string, jobs <-chan string, results chan<- string, wg *sync.
 		resp.Body.Close()
 		cancel() // Release the context resources
 	}
+}
+
+func GetKeyFromBlueprint(key string, bp Blueprint) string {
+	val, err := bp.Eval(GlobalRef(key).AsValue())
+	if err == nil {
+		v, _ := val.Unmark()
+		if !v.IsNull() && v.Type() == cty.String {
+			return v.AsString()
+		}
+	}
+	return ""
+}
+
+// GetEvaluatedString safely gets and evaluates a setting from a module within a blueprint.
+func GetEvaluatedString(key string, m *Module, bp *Blueprint) string {
+	val := m.Settings.Get(key)
+	if val.IsNull() {
+		return ""
+	}
+
+	// Evaluate the expression using the blueprint's evaluation context
+	evaluatedVal, err := bp.Eval(val)
+	if err != nil {
+		return ""
+	}
+
+	// Ensure the evaluated result is a string and not null
+	if evaluatedVal.Type() == cty.String && !evaluatedVal.IsNull() {
+		return evaluatedVal.AsString()
+	}
+	return ""
 }

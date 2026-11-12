@@ -26,7 +26,17 @@ This guide also includes a `gke-tpu-7x-job.yaml` that creates a Kubernetes Pod a
 
 Before you start, make sure you have performed the following tasks:
 
-1. Enable the Google Kubernetes Engine API.
+1. Enable the required Google Cloud APIs (`compute.googleapis.com`, `container.googleapis.com`, `iam.googleapis.com`, `storage.googleapis.com`):
+
+   ```bash
+   gcloud services enable \
+     compute.googleapis.com \
+     container.googleapis.com \
+     iam.googleapis.com \
+     storage.googleapis.com \
+     --project=<PROJECT_ID>
+   ```
+
 2. If you want to use the Google Cloud CLI for this task, [install](https://cloud.google.com/sdk/docs/install) and then [initialize](https://cloud.google.com/sdk/docs/initializing) the gcloud CLI. If you previously installed the gcloud CLI, get the latest version by running `gcloud components update`.
    - **NOTE**: For existing gcloud CLI installations, make sure to set the compute/region and compute/zone properties. By setting default locations, you can avoid errors in gcloud CLI like the following: One of [--zone, --region] must be supplied: Please specify location.
 3. Ensure that you have enough quota for **TPU 7x** in the specified region.
@@ -43,20 +53,13 @@ Before you start, make sure you have performed the following tasks:
 This section guides you through the cluster creation process.
 
 1. [Launch Cloud Shell](https://cloud.google.com/shell/docs/launching-cloud-shell). You can use a different environment; however, we recommend Cloud Shell because the dependencies are already pre-installed for Cluster Toolkit. If you don't want to use Cloud Shell, follow the instructions to [install dependencies](https://cloud.google.com/cluster-toolkit/docs/setup/install-dependencies) to prepare a different environment.
-2. Clone the Cluster Toolkit from the git repository:
+2. From the root of the [`cluster-toolkit`](https://github.com/GoogleCloudPlatform/cluster-toolkit) repository, build `./gcluster` (if not already built):
 
     ```bash
-    cd ~
-    git clone https://github.com/GoogleCloudPlatform/cluster-toolkit.git
+    test -x ./gcluster || make
     ```
 
-3. Install the Cluster Toolkit:
-
-    ```bash
-    cd cluster-toolkit && git checkout main && make
-    ```
-
-4. Create a Cloud Storage bucket to store the state of the Terraform deployment:
+3. Create a Cloud Storage bucket to store the state of the Terraform deployment:
 
     ```bash
     gcloud storage buckets create gs://BUCKET_NAME \
@@ -70,33 +73,35 @@ This section guides you through the cluster creation process.
    - `BUCKET_NAME`: the name of the new Cloud Storage bucket (e.g., `tpu-7x-bucket`).
    - `COMPUTE_REGION`: the compute region for the cluster (e.g., `us-central1`).
 
-5. In the `examples/gke-tpu-7x/gke-tpu-7x-deployment.yaml` file, replace the following variables in the `terraform_backend_defaults` and `vars` sections to match the specific values for your deployment:
+4. In the `examples/gke-tpu-7x/gke-tpu-7x-deployment.yaml` file, replace the following variables in the `terraform_backend_defaults` and `vars` sections to match the specific values for your deployment:
    - `bucket`: the name of the Cloud Storage bucket you created in the previous step.
    - `project_id`: your Google Cloud project ID.
    - `region`: the compute region for the cluster.
    - `zone`: the compute zone for the TPUs.
    - `num_slices`: the number of TPU slices (node pools) to create.
-   - `machine_type`: the machine type of the TPU.
+   - `compute_machine_type`: the machine type of the TPU.
    - `tpu_topology`: the TPU placement topology for the node pool.
    - `authorized_cidr`: The IP address range you want to allow to connect with the cluster.
-   - `reservation`: the name of the compute engine reservation for your TPU 7x nodes.
+   - `reservation_affinity`: the reservation settings (by default, specify the reservation name under Option 1, or uncomment an alternative consumption model such as DWS Flex Start, DWS Flex Start + Queued Provisioning, Spot, or On-Demand).
 
-    > **Note:** The `static_node_count` is now automatically calculated from `machine_type`, `num_slices` and `tpu_topology`. It is derived using the formula: `(total_chips_in_topology / chips_per_machine)`. For further details, please refer [appendix](#node-count-calculation)
+    > **Note:** The `static_node_count` is now automatically calculated from `compute_machine_type`, `num_slices` and `tpu_topology`. It is derived using the formula: `(total_chips_in_topology / chips_per_machine)`. For further details, please refer [appendix](#node-count-calculation)
 
-6. To modify advanced settings, edit `examples/gke-tpu-7x/gke-tpu-7x.yaml`.
-7. Generate [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/provide-credentials-adc#google-idp) to provide access to Terraform.
+5. To modify advanced settings, edit `examples/gke-tpu-7x/gke-tpu-7x.yaml`.
+
+    > **Note:** Queued provisioning (Option 3) is only supported on multi-host TPU slices. For more information, see [About flex-start provisioning mode](https://cloud.google.com/kubernetes-engine/docs/concepts/dws).
+
+6. Generate [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/provide-credentials-adc#google-idp) to provide access to Terraform.
 
     ```bash
     gcloud auth application-default login
     ```
 
-8. Deploy the blueprint to provision the GKE infrastructure:
+7. Deploy the blueprint to provision the GKE infrastructure:
 
     ```bash
-     cd ~/cluster-toolkit
-     ./gcluster deploy -d \
-     examples/gke-tpu-7x/gke-tpu-7x-deployment.yaml \
-     examples/gke-tpu-7x/gke-tpu-7x.yaml
+    ./gcluster deploy -d \
+    examples/gke-tpu-7x/gke-tpu-7x-deployment.yaml \
+    examples/gke-tpu-7x/gke-tpu-7x.yaml
     ```
 
    This process will take several minutes.
@@ -116,11 +121,10 @@ This repository also includes an advanced blueprint, `gke-tpu-7x-advanced.yaml`,
 
 The process is nearly identical to the basic deployment.
 
-1. Ensure you have completed steps 1-7 from the "Create a cluster" section above. The same `gke-tpu-7x-deployment.yaml` file can be used.
+1. Ensure you have completed steps 1-6 from the "Create a cluster" section above. The same `gke-tpu-7x-deployment.yaml` file can be used.
 2. In the final deploy command, simply point to the `gke-tpu-7x-advanced.yaml` blueprint instead.
 
     ```sh
-    cd ~/cluster-toolkit
     ./gcluster deploy -d \
     examples/gke-tpu-7x/gke-tpu-7x-deployment.yaml \
     examples/gke-tpu-7x/gke-tpu-7x-advanced.yaml
@@ -132,16 +136,25 @@ The process is nearly identical to the basic deployment.
 
 This blueprint supports [Kueue](https://kueue.sigs.k8s.io/), a kubernetes-native system for managing quotas and job queuing. This is enabled by default in the advanced blueprint (`gke-tpu-7x-advanced.yaml`).
 
-1. **Quota:** The blueprint automatically calculates and sets a `google.com/tpu` quota in the `ClusterQueue` matching the total static TPU capacity of your cluster (slices x nodes x chips).
-2. **Submit a Job:** To submit a job to the queue, add the label `kueue.x-k8s.io/queue-name: user-queue` to your Job or JobSet manifest.
+**NOTE**:
+By default, the toolkit dynamically applies an embedded kueue configuration based on your **Pathways** and **Dynamic Slicing** settings.
+
+1. **Custom Configurations:**
+   - If you explicitly disable both Pathways and Dynamic Slicing, the toolkit will still install the Kueue engine/controllers, but it leaves them unconfigured(no default queues or resource flavors are created).
+   - If you want to override the default embedded configurations, or apply configuration in the scenario above, you can uncomment and set `config_path` in the `kueue` section of the `workload-manager-install` module in the blueprint.
+   - For more details on toolkit's default configurations and variables, see the [`kubectl-apply` documentation](https://github.com/GoogleCloudPlatform/cluster-toolkit/tree/main/modules/management/kubectl-apply#inputs).
+
+2. **Quota:** The blueprint automatically calculates and sets a `google.com/tpu` quota in the `ClusterQueue` matching the total static TPU capacity of your cluster (slices x nodes x chips).
+
+3. **Submit a Job:** To submit a job to the queue, add the label `kueue.x-k8s.io/queue-name: user-queue` to your Job or JobSet manifest.
 
     A sample job file is provided: `kueue-job-sample.yaml`.
 
     ```sh
-    kubectl create -f ~/cluster-toolkit/examples/gke-tpu-7x/kueue-job-sample.yaml
+    kubectl create -f examples/gke-tpu-7x/kueue-job-sample.yaml
     ```
 
-3. **Validation:** Check the status of your workload.
+4. **Validation:** Check the status of your workload.
 
     ```sh
     kubectl get workloads
@@ -187,7 +200,7 @@ The `gke-tpu-7x-job.yaml` file creates a Pod resource in Kubernetes. The workloa
    The sample job file already contains the correct node selectors for the example deployment.
 
     ```bash
-    kubectl create -f ~/cluster-toolkit/examples/gke-tpu-7x/gke-tpu-7x-job.yaml
+    kubectl create -f examples/gke-tpu-7x/gke-tpu-7x-job.yaml
     ```
 
    This command returns a Pod name.
@@ -206,6 +219,16 @@ The `gke-tpu-7x-job.yaml` file creates a Pod resource in Kubernetes. The workloa
 
    If successful, this should display `Global device count: 8` near the end of the logs. [`jax.device_count()`](https://cloud.google.com/tpu/docs/jax-pods) reports the number of devices your workload is actively using. It actually counts the TensorCores, GKE allocates by Chip. For more details refer to the [Appendix](#how-to-calculate-the-expected-device-count-after-running-the-gke-tpu-7x-jobyaml)
 
+## Configuring ML Diagnostics
+
+This blueprint supports [Google Cloud ML Diagnostics](https://docs.cloud.google.com/tpu/docs/ml-diagnostics/overview) (also known as Diagon++). This managed service simplifies the observability of AI/ML workloads on GKE by providing integrated profiling, automated log analysis, and topology-aware monitoring directly within the Google Cloud Console.
+
+This feature is enabled by default and requires GKE version 1.35.0-gke.3065000 or higher. It can be configured using the `enable_ml_diagnostics` setting in the `gke-tpu-7x-cluster` module. When enabled, the cluster is automatically configured with the necessary ML Diagnostics components, the designated user namespace is labeled, and the Workload Identity service accounts required by the ML Diagnostics SDK are provisioned.
+
+To leverage ML Diagnostics in your own workloads, you need to integrate the ML Diagnostics SDK within your job scripts. For detailed instructions on SDK integration and viewing your profiling data, please refer to the [Google Cloud ML Diagnostics documentation](https://docs.cloud.google.com/tpu/docs/ml-diagnostics/sdk).
+
+To test ML Diagnostics with a sample workload, refer to the [ML Diagnostics Sample Workload Test README](../gke-tpu-v6e/ml-diagnostics-sample-workload-test/README.md). This guide explains how to build a test image and run a job to verify metrics and profiling in the Google Cloud Console.
+
 ## Clean up
 
 To avoid recurring charges for the resources used, clean up the resources provisioned by Cluster Toolkit:
@@ -213,6 +236,8 @@ To avoid recurring charges for the resources used, clean up the resources provis
 ```bash
 ./gcluster destroy DEPLOYMENT_NAME
 ```
+
+**Note:** GCS buckets created for Terraform state are not deleted by the `./gcluster destroy` command and must be deleted manually.
 
 ## Appendix
 
@@ -224,14 +249,14 @@ To avoid recurring charges for the resources used, clean up the resources provis
 #### Example 1: *Single-Node Slice* (The default for this blueprint)
 
 - `tpu_topology`: `2x2x1` (Total chips = 2*2*1 = **4**)
-- `machine_type`: `tpu7x-standard-4t` (Chips per machine = **4**)
+- `compute_machine_type`: `tpu7x-standard-4t` (Chips per machine = **4**)
 - **Calculation**: `4 / 4 = 1`
 - **Correct value**: `static_node_count: 1`
 
 #### Example 2: *Multi-Node Slice*
 
 - `tpu_topology`: `4x4x4` (Total chips = 4*4*4 = **64**)
-- `machine_type`: `tpu7x-standard-4t` (Chips per machine = **4**)
+- `compute_machine_type`: `tpu7x-standard-4t` (Chips per machine = **4**)
 - **Calculation**: `64 / 4 = 16`
 - **Correct value**: `static_node_count: 16`
 
@@ -241,7 +266,7 @@ This example shows how `num_slices` and `static_node_count` work together. The g
 
 - `num_slices`: `3` (We want three independent node pools)
 - `tpu_topology`: `2x2x2` (Each slice will have 2*2*2 = 8 chips)
-- `machine_type`: `tpu7x-standard-4t` (Chips per machine = 4)
+- `compute_machine_type`: `tpu7x-standard-4t` (Chips per machine = 4)
 - **Calculation**: `8 / 4 = 2`
 - **Correct value**: `static_node_count: 2`
 - **Result**: This configuration will create three separate GKE node pools, and each of those node pools will contain two nodes. The total number of TPU nodes created will be `3 * 2 = 6`.
@@ -442,142 +467,3 @@ The blueprint includes a sample job (`shared-fs-job`) that demonstrates how two 
     ```
 
 The logs will display content from `shared_output.txt`, showing timestamps and hostnames from both pods, confirming that the filesystem is truly shared.
-
-### Understanding ML Diagnostics integration
-
-This blueprint includes support for easy installation and configuration of [Google Cloud ML Diagnostics](https://docs.cloud.google.com/tpu/docs/ml-diagnostics/overview) (also known as Diagon++), a managed service for profiling, logging, and monitoring AI/ML workloads on GKE.
-
-This feature automates the setup of necessary components, including:
-
-- **ML Diagnostics Injection Webhook:** Injects required metadata into workload pods to enable the ML Diagnostics SDK.
-- **ML Diagnostics Connection Operator:** Enables on-demand profiling for ML workloads.
-- **Namespace Configuration:** Labels the designated user namespace to automatically enable diagnostics for any resources created within it.
-- **Prerequisite Validation:** Checks for essential configurations like Cert-Manager and Workload Identity.
-
-#### Enabling ML Diagnostics
-
-To enable Google Cloud ML Diagnostics, perform the following steps **before** deploying the blueprint:
-
-1. **Specify user workload namespace:** In the `vars:` section of `gke-tpu-7x-deployment.yaml`, define the namespace to be pre-configured for your workloads by setting `user_namespace`. If not provided, the value will default to ‘default’. The `user_namespace` will be automatically created by the `gke-tpu-7x-cluster` module if it doesn't already exist. This namespace will be used across different modules.
-
-    ```yaml
-    vars:
-      # ... other variables ...
-      user_namespace: ai-workloads # Example namespace
-    ```
-
-2. **Add IAM Permissions:** The workload Kubernetes Service Account bound to the Google Service Account requires specific [roles](https://docs.cloud.google.com/tpu/docs/ml-diagnostics/overview#iam-permissions) for running ML Diagnostics workloads. In the blueprint, ensure `"hypercomputecluster.editor"` is added to `project_roles` of the `workload_service_account` module.
-
-    ```yaml
-      - id: workload_service_account
-        source: modules/project/service-account
-        settings:
-          name: gke-wl-sa
-          project_roles:
-          # ... other roles ...
-          - hypercomputecluster.editor
-    ```
-
-3. **Configure Workload Identity Namespace:** Ensure the `gke-tpu-7x-cluster` module is configured to create the Workload Identity resources in the user namespace.
-
-    ```yaml
-      - id: gke-tpu-7x-cluster
-        source: modules/scheduler/gke-cluster
-        settings:
-          # ... other settings ...
-          namespace: $(vars.user_namespace)
-          configure_workload_identity_sa: true
-    ```
-
-4. **Configure Kueue Namespace:** In the `workload-manager-install` module, ensure the Kueue LocalQueue is created in the user namespace by adding `namespace: $(vars.user_namespace)` to the `config_template_vars` for Kueue, if it is not provided, the value will default to ‘default’:
-
-    ```yaml
-          kueue:
-            install: true
-            config_path: $(vars.kueue_configuration_path)
-            config_template_vars:
-              # ... other vars ...
-              namespace: $(vars.user_namespace)
-    ```
-
-5. **Cert-Manager:** In the `workload-manager-install` module, ensure Cert-Manager is set to install, as it's required by the ML Diagnostics webhook:
-
-    ```yaml
-      - id: workload-manager-install
-        source: modules/management/kubectl-apply
-        use: [gke-tpu-7x-cluster]
-        settings:
-          # ... kueue and other settings ...
-          cert_manager:
-            install: true
-            # version: "v1.17.2" # Optional: specify version
-    ```
-
-6. **ML Diagnostics Module:** Ensure `gke-ml-diagnostics` module is present in the blueprint to install ML Diagnostics charts and configurations to user namespace.
-
-    ```yaml
-      - id: gke-ml-diagnostics
-        source: modules/management/mldiagnostics
-        use: [gke-tpu-7x-cluster, workload-manager-install]
-        # Optional: Specify the versions of the injection webhook and connection operator to install.
-        # settings:
-            # injection_webhook_version: "0.25.0" # Optional
-            # connection_operator_version: "0.21.0" # Optional
-          # Optional: Specify the namespace to be configured for running workloads with ML Diagnostics.
-          # If not provided, the value will be taken from gke-tpu-7x-cluster module
-          # namespace: $(vars.user_namespace)
-    ```
-
-In `gke-ml-diagnostics` module, cert-manager and workload identity will be validated as they are created in other modules.
-
-After making these changes, run the `gcluster deploy` command to create the GKE cluster with the ML diagnostics configuration.
-
-#### Testing ML Diagnostics Cluster Configuration
-
-1. Connect to your cluster:
-
-    ```sh
-    gcloud container clusters get-credentials DEPLOYMENT_NAME --region=REGION --project=PROJECT_ID
-    ```
-
-    Replace the `DEPLOYMENT_NAME`,`REGION` and `PROJECT_ID` with the ones used in the blueprint.
-
-2. Verify helm charts and their versions installed in cert-manager and gke-mldiagnostics namespaces.
-
-    ```sh
-    helm ls -n cert-manager
-    helm ls -n gke-mldiagnostics
-    ```
-
-3. Verify pods and services in cert-manager and gke-mldiagnostics namespaces are running.
-
-    ```sh
-    kubectl get all -n cert-manager
-    kubectl get all -n gke-mldiagnostics
-    ```
-
-4. Verify user namespace is created and labeled with "managed-mldiagnostics-gke: true".
-
-    ```sh
-    kubectl describe ns <user_namespace>
-    ```
-
-5. Verify kubernetes service account in user namespace.
-
-    ```sh
-    kubectl get serviceaccount -n <user_namespace>
-    kubectl get sa <k8s_service_account_name> -n <user_namespace> -o yaml
-    # Check for workload identity annotations
-    ```
-
-    Default k8s_service_account_name is workload-identity-k8s-sa
-
-6. Verify Kueue LocalQueue in the user namespace.
-
-    ```sh
-    kubectl get localqueues -n <user_namespace>
-    ```
-
-These steps confirm that the ML Diagnostics components and their dependencies are correctly set up in the cluster.
-
-To test with sample workload, refer to the [ML Diagnostics Test README](../../modules/management/mldiagnostics/sample-workload-test/README.md). This guide explains how to build a test image and run a job to verify metrics and profiling in the Google Cloud Console.

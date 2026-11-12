@@ -50,6 +50,17 @@ EOT
     ghpcfe_id = var.deployment_name,
   }
   labels = merge(var.extra_labels, local.default_labels)
+
+  # Content hash over everything staged into the control bucket. Clusters pull
+  # their bootstrap/ansible files from the bucket at boot, so the staged copy
+  # must be re-uploaded whenever any source file changes. Local build artifacts
+  # (__pycache__, .DS_Store) are excluded here and from the upload below.
+  gcs_bucket_root = "${path.module}/../infrastructure_files/gcs_bucket"
+  gcs_bucket_files = [
+    for f in fileset(local.gcs_bucket_root, "**") : f
+    if !can(regex("(^|/)(__pycache__|\\.DS_Store)(/|$)", f))
+  ]
+  gcs_bucket_hash = sha256(join(",", [for f in local.gcs_bucket_files : filesha256("${local.gcs_bucket_root}/${f}")]))
 }
 
 
@@ -86,9 +97,14 @@ module "control_bucket" {
 
 resource "null_resource" "uploader" {
   depends_on = [module.control_bucket.bucket]
+  # Re-run the upload whenever any staged source file changes, so clusters
+  # never boot from a stale copy of the bootstrap/ansible files.
+  triggers = {
+    gcs_bucket_hash = local.gcs_bucket_hash
+  }
   # Upload files
   provisioner "local-exec" {
-    command = "gsutil -m cp -r ../infrastructure_files/gcs_bucket/* ${module.control_bucket.bucket.url}/"
+    command = "gcloud storage rsync --recursive --exclude='(^|.*/)(__pycache__/.*|\\.DS_Store)$' ../infrastructure_files/gcs_bucket ${module.control_bucket.bucket.url}"
   }
 }
 
@@ -149,6 +165,7 @@ resource "google_compute_instance" "server_vm" {
   metadata = {
     startup-script-url      = "${module.control_bucket.bucket.url}/webserver/startup.sh",
     webserver-config-bucket = module.control_bucket.bucket.name,
+    terraform-state-bucket  = var.terraform_state_bucket,
     ghpcfe-c2-topic         = module.pubsub.topic,
     hostname                = var.webserver_hostname
     deploy_mode             = var.deployment_mode

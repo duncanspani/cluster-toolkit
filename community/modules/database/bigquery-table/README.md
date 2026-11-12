@@ -4,12 +4,12 @@ Creates a BigQuery table with a specified schema.
 
 Primarily used for FSI - MonteCarlo Tutorial: **[fsi-montecarlo-on-batch-tutorial]**.
 
-[fsi-montecarlo-on-batch-tutorial]: ../docs/tutorials/fsi-montecarlo-on-batch/README.md
+[fsi-montecarlo-on-batch-tutorial]: ../../../../docs/tutorials/fsi-montecarlo-on-batch/README.md
 
 ## Usage
 
 ```yaml
-id: bq-table
+  - id: bq-table
     source: community/modules/database/bigquery-table
     use: [bq-dataset]
     settings:
@@ -44,7 +44,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 4.42 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
 

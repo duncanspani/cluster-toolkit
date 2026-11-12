@@ -30,8 +30,8 @@ type missingPrereq struct {
 
 // Context holds the active CLI context.
 type Context struct {
-	ProjectID   string `json:"project_id"`
-	ClusterName string `json:"cluster_name"`
+	ProjectID   string `json:"project"`
+	ClusterName string `json:"cluster"`
 	Location    string `json:"location"`
 }
 
@@ -43,8 +43,20 @@ type PrereqState struct {
 	ADCConfigured                bool      `json:"adc_configured"`
 	KubectlInstalled             bool      `json:"kubectl_installed"`
 	GKEGCloudAuthPluginInstalled bool      `json:"gke_gcloud_auth_plugin_installed"`
-	DockerCredsConfigured        bool      `json:"docker_creds_configured"`
 	ArtifactRegistryAPIEnabled   bool      `json:"artifact_registry_api_enabled"`
 	LastCheckedProjectID         string    `json:"last_checked_project_id"`
 	LastCheckedTimestamp         time.Time `json:"last_checked_timestamp"`
+}
+
+type dockerAuthEntry struct {
+	Auth          string `json:"auth"`
+	IdentityToken string `json:"identitytoken"`
+	RegistryToken string `json:"registrytoken"`
+	Password      string `json:"password"`
+}
+
+type dockerConfig struct {
+	Auths       map[string]dockerAuthEntry `json:"auths"`
+	CredHelpers map[string]string          `json:"credHelpers"`
+	CredsStore  string                     `json:"credsStore"`
 }

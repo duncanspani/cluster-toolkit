@@ -6,7 +6,7 @@ module are listed in more detail [below](#module-fields). Blueprints can be
 extended in functionality by incorporating [modules from GitHub
 repositories][ghmods].
 
-[ghmods]: #github-modules
+[ghmods]: #github-hosted-modules-and-packages
 
 ## All Modules
 
@@ -31,6 +31,11 @@ Modules that are still in development and less stable are labeled with the
 [stable-badge]: https://img.shields.io/badge/-stable-lightgrey?style=plastic
 [experimental-badge]: https://img.shields.io/badge/-experimental-%23febfa2?style=plastic
 [deprecated-badge]: https://img.shields.io/badge/-deprecated-%23fea2a2?style=plastic
+### AI
+
+* **[discovery-engine]** ![community-badge] ![experimental-badge] : Provisions Discovery Engine generative chat engine and assistant endpoints.
+
+[discovery-engine]: ../community/modules/ai/discovery-engine/README.md
 
 ### Compute
 
@@ -57,6 +62,8 @@ Modules that are still in development and less stable are labeled with the
   Notebook. Primarily used for [FSI - MonteCarlo Tutorial][fsi-montecarlo-on-batch-tutorial].
 * **[gke-nodeset]** ![community-badge] ![experimental-badge] : Create a slinky nodeset to be used by the [gke-partition] module.
 * **[gke-partition]** ![community-badge] ![experimental-badge] : Creates a slinky partition to be used by a [slurm-controller][schedmd-slurm-gcp-v6-controller].
+* **[colab]** ![community-badge] ![experimental-badge] : Creates a Vertex AI
+  Colab Enterprise runtime template and runtime instance.
 
 [vm-instance]: compute/vm-instance/README.md
 [cloud-run]: compute/cloud-run/README.md
@@ -70,7 +77,28 @@ Modules that are still in development and less stable are labeled with the
 [htcondor-execute-point]: ../community/modules/compute/htcondor-execute-point/README.md
 [mig]: ../community/modules/compute/mig/README.md
 [notebook]: ../community/modules/compute/notebook/README.md
+[gke-nodeset]: ../community/modules/compute/gke-nodeset/README.md
+[gke-partition]: ../community/modules/compute/gke-partition/README.md
+[colab]: ../community/modules/compute/colab/README.md
 [fsi-montecarlo-on-batch-tutorial]: ../docs/tutorials/fsi-montecarlo-on-batch/README.md
+
+### Container
+
+* **[apptainer-runtime]** ![community-badge] ![experimental-badge] : Prepares
+  the shared Apptainer runtime layout and modulefile tree on a mounted path.
+* **[apptainer-app]** ![community-badge] ![experimental-badge] : Stages an
+  Artifact Registry image as an Apptainer SIF, with a wrapper command,
+  modulefile, and manifest.
+* **[artifact-registry]** ![community-badge] ![experimental-badge] : Creates and
+  manages Google Cloud Artifact Registry repositories, including remote
+  repositories with pull-through caching.
+* **[cloud-build]** ![community-badge] ![experimental-badge] : Executes Google
+  Cloud Build jobs.
+
+[apptainer-runtime]: ../community/modules/container/apptainer-runtime/README.md
+[apptainer-app]: ../community/modules/container/apptainer-app/README.md
+[artifact-registry]: ../community/modules/container/artifact-registry/README.md
+[cloud-build]: ../community/modules/container/cloud-build/README.md
 
 ### Database
 
@@ -107,10 +135,28 @@ Modules that are still in development and less stable are labeled with the
 * **[cloud-storage-bucket]** ![core-badge] : Creates a Google Cloud Storage (GCS) bucket.
 * **[gke-persistent-volume]** ![core-badge] ![experimental-badge] : Creates
   persistent volumes and persistent volume claims for shared storage.
+* **[gke-storage]** ![core-badge] ![experimental-badge] : Creates a Kubernetes
+  storage class and persistent volume claims to dynamically provision Google
+  Cloud storage such as Hyperdisk for GKE workloads.
+* **[netapp-storage-pool]** ![core-badge] : Creates a
+  [Google Cloud NetApp Volumes](https://cloud.google.com/netapp/volumes/docs/discover/overview)
+  storage pool for [netapp-volume] file systems.
 * **[nfs-server]** ![community-badge] ![experimental-badge] : Creates a VM and
   configures an NFS server that can be mounted by other VM.
 * **[weka-client]** ![community-badge] ![experimental-badge] : Installs client
   and mounts [WEKA](https://www.weka.io/) filesystems.
+* **[gcs-objects]** ![community-badge] ![experimental-badge] : Declaratively creates
+  and manages objects in a Google Cloud Storage (GCS) bucket from inline content, local files, or directories.
+* **[gcs-sync]** ![community-badge] ![experimental-badge] : Synchronizes files
+  and directories from remote Git repositories into Cloud Storage buckets at apply time.
+* **[sycomp-scale]** ![community-badge] ![experimental-badge] : Documents how
+  to deploy an IBM Storage Scale cluster using the
+  [Sycomp Intelligent Data Storage Platform](https://sycomp.com/solution/hpc/storage/)
+  Terraform modules.
+* **[DDN-EXAScaler]** ![community-badge] ![deprecated-badge] : No longer
+  supported. Use [managed-lustre] instead.
+* **[Intel-DAOS]** ![community-badge] ![deprecated-badge] : No longer
+  supported. Use [managed-lustre] instead.
 
 [filestore]: file-system/filestore/README.md
 [netapp-volume]: file-system/netapp-volume/README.md
@@ -121,12 +167,21 @@ Modules that are still in development and less stable are labeled with the
 [cloud-storage-bucket]: file-system/cloud-storage-bucket/README.md
 [gke-persistent-volume]: file-system/gke-persistent-volume/README.md
 [weka-client]: ../community/modules/file-system/weka-client/README.md
+[gke-storage]: file-system/gke-storage/README.md
+[netapp-storage-pool]: file-system/netapp-storage-pool/README.md
+[gcs-objects]: ../community/modules/file-system/gcs-objects/README.md
+[gcs-sync]: ../community/modules/file-system/gcs-sync/README.md
+[sycomp-scale]: ../community/modules/file-system/sycomp-scale/README.md
+[DDN-EXAScaler]: ../community/modules/file-system/DDN-EXAScaler/README.md
+[Intel-DAOS]: ../community/modules/file-system/Intel-DAOS/README.md
 
 ### IAM
 
 * **[iap-policy]** ![core-badge] : Configures IAM policy for Identity-Aware Proxy (IAP) on a Google Cloud Backend Service.
+* **[service-account-profiles]** ![community-badge] ![experimental-badge] : Applies a named least-privilege permission profile (Slurm controller, login or compute, Packer image builder, or custom) with resource-scoped IAM bindings to an existing keyless service account.
 
 [iap-policy]: iam/iap-policy/README.md
+[service-account-profiles]: ../community/modules/iam/service-account-profiles/README.md
 
 ### Management
 
@@ -134,11 +189,15 @@ Modules that are still in development and less stable are labeled with the
 * **[kubernetes-namespace]** ![core-badge] : Creates a Kubernetes namespace.
 * **[direct-helm-install]** ![community-badge] ![experimental-badge] : Provides a standardized way to deploy Helm charts directly to a GKE cluster.
 * **[helm-upgrade]** ![community-badge] ![experimental-badge] : Manages Helm chart deployment lifecycles inside a GKE cluster.
+* **[dependencies-installer]** ![community-badge] ![experimental-badge] :
+  Installs common GKE workload dependencies via Helm, including Kueue, JobSet,
+  the NVIDIA GPU Operator, and the NVIDIA DRA driver.
 
 [kubectl-apply]: management/kubectl-apply/README.md
 [kubernetes-namespace]: management/kubernetes-namespace/README.md
 [direct-helm-install]: ../community/modules/management/direct-helm-install/README.md
 [helm-upgrade]: ../community/modules/management/helm-upgrade/README.md
+[dependencies-installer]: ../community/modules/management/dependencies-installer/README.md
 
 ### Monitoring
 
@@ -147,6 +206,12 @@ Modules that are still in development and less stable are labeled with the
   visually tracking a Cluster Toolkit deployment.
 
 [dashboard]: monitoring/dashboard/README.md
+
+### Diagnostics
+
+* **[cluster-health-check]** ![community-badge] : Performs passive health checks on NVIDIA GPUs within a GKE cluster using DCGM (Data Center GPU Manager) and NVML.
+
+[cluster-health-check]: ../community/cluster-health-check/README.md
 
 ### Network
 
@@ -163,6 +228,14 @@ Modules that are still in development and less stable are labeled with the
   rules to existing networks (commonly used with [pre-existing-vpc]).
 * **[private-service-access]** ![core-badge] :
   Configures Private Services Access for a VPC network (commonly used with [filestore] and [slurm-cloudsql-federation]).
+* **[pre-existing-subnetwork]** ![core-badge] : Used to connect newly built
+  components to a pre-existing subnetwork.
+* **[gpu-rdma-vpc]** ![core-badge] : Creates a VPC network and subnetworks for
+  RDMA traffic between GPU nodes, with outputs for [vm-instance], Slurm, and
+  GKE modules.
+* **[int-app-lb]** ![community-badge] ![experimental-badge] : Creates a regional
+  Internal Application (L7) Load Balancer in Google Cloud with support for
+  Managed Instance Group backends, IAP, and custom SSL certificates.
 
 [vpc]: network/vpc/README.md
 [dns-managed-zone]: network/dns-managed-zone/README.md
@@ -171,6 +244,9 @@ Modules that are still in development and less stable are labeled with the
 [pre-existing-vpc]: network/pre-existing-vpc/README.md
 [firewall-rules]: network/firewall-rules/README.md
 [private-service-access]: network/private-service-access/README.md
+[pre-existing-subnetwork]: network/pre-existing-subnetwork/README.md
+[gpu-rdma-vpc]: network/gpu-rdma-vpc/README.md
+[int-app-lb]: ../community/modules/network/int-app-lb/README.md
 
 ### Packer
 
@@ -181,16 +257,35 @@ Modules that are still in development and less stable are labeled with the
 
 ### Project
 
+* **[aiplatform-predict-iam](../community/modules/project/aiplatform-predict-iam/README.md)** ![community-badge] ![experimental-badge]:
+  Creates a custom role granting only Agent Platform prediction access to a service account.
+
 * **[service-account]** ![core-badge] : Creates [service
   accounts](https://cloud.google.com/iam/docs/service-accounts) for a GCP
   project.
 * **[workload_identity_binding]** ![core-badge] : Creates a Workload Identity binding between a Google Service Account (GSA) and a Kubernetes Service Account (KSA).
 * **[service-enablement]** ![community-badge] ![experimental-badge] : Allows enabling
   various APIs for a Google Cloud Project.
+* **[project-metadata]** ![community-badge] ![experimental-badge] : Sets project compute
+  metadata items for a Google Cloud project.
+* **[service-agent]** ![community-badge] ![experimental-badge] : Creates the
+  service agent for a Google Cloud API and exposes its email and IAM member
+  string as outputs.
+* **[pre-existing-project]** ![community-badge] ![experimental-badge] : Retrieves
+  information about an existing GCP project (name, number) and exposes it as
+  outputs.
+* **[new-project]** ![community-badge] ![deprecated-badge] : No longer
+  supported. Use the upstream
+  [terraform-google-project-factory](https://github.com/terraform-google-modules/terraform-google-project-factory)
+  module instead.
 
 [service-account]: ../modules/project/service-account/README.md
 [workload_identity_binding]: project/workload_identity_binding/README.md
 [service-enablement]: ../community/modules/project/service-enablement/README.md
+[project-metadata]: ../community/modules/project/project-metadata/README.md
+[service-agent]: ../community/modules/project/service-agent/README.md
+[pre-existing-project]: ../community/modules/project/pre-existing-project/README.md
+[new-project]: ../community/modules/project/new-project/README.md
 
 ### Pub/Sub
 
@@ -206,8 +301,16 @@ Pub/Sub subscription. Primarily used for [FSI - MonteCarlo Tutorial][fsi-monteca
 
 * **[chrome-remote-desktop]** ![community-badge] ![experimental-badge] : Creates
   a GPU accelerated Chrome Remote Desktop.
+* **[novnc-runtime]** ![community-badge] ![experimental-badge] : Builds the
+  startup-script runners for a per-user XFCE + noVNC desktop runtime, to be
+  layered onto an existing host such as a Slurm login node.
+* **[novnc-desktop]** ![community-badge] ![experimental-badge] : Creates a
+  standalone VM that serves per-user XFCE desktops through noVNC using the
+  [novnc-runtime] module.
 
 [chrome-remote-desktop]: ../community/modules/remote-desktop/chrome-remote-desktop/README.md
+[novnc-runtime]: ../community/modules/remote-desktop/novnc-runtime/README.md
+[novnc-desktop]: ../community/modules/remote-desktop/novnc-desktop/README.md
 
 ### Scheduler
 
@@ -230,6 +333,14 @@ Pub/Sub subscription. Primarily used for [FSI - MonteCarlo Tutorial][fsi-monteca
 * **[htcondor-access-point]** ![community-badge] ![experimental-badge] : Creates
   a regional instance group managing a highly available HTCondor access point
   (login node).
+* **[htcondor-central-manager]** ![community-badge] ![experimental-badge] :
+  Creates a Managed Instance Group running a highly available HTCondor central
+  manager.
+* **[htcondor-service-accounts]** ![community-badge] ![experimental-badge] :
+  Creates the default service accounts and IAM roles for an HTCondor pool.
+* **[slinky]** ![community-badge] ![experimental-badge] : Installs the
+  [Slinky](https://slinky.ai) Slurm operator and deploys a Slurm cluster with a
+  login node on GKE.
 
 [batch-job-template]: ../modules/scheduler/batch-job-template/README.md
 [batch-login-node]: ../modules/scheduler/batch-login-node/README.md
@@ -240,6 +351,9 @@ Pub/Sub subscription. Primarily used for [FSI - MonteCarlo Tutorial][fsi-monteca
 [htcondor-access-point]: ../community/modules/scheduler/htcondor-access-point/README.md
 [schedmd-slurm-gcp-v6-controller]: ../community/modules/scheduler/schedmd-slurm-gcp-v6-controller/README.md
 [schedmd-slurm-gcp-v6-login]: ../community/modules/scheduler/schedmd-slurm-gcp-v6-login/README.md
+[htcondor-central-manager]: ../community/modules/scheduler/htcondor-central-manager/README.md
+[htcondor-service-accounts]: ../community/modules/scheduler/htcondor-service-accounts/README.md
+[slinky]: ../community/modules/scheduler/slinky/README.md
 
 ### Scripts
 
@@ -252,11 +366,11 @@ Pub/Sub subscription. Primarily used for [FSI - MonteCarlo Tutorial][fsi-monteca
   a startup script to install HTCondor and exports a list of required APIs
 * **[ramble-execute]** ![community-badge] ![experimental-badge] : Creates a
   startup script to execute
-  [Ramble](https://github.com/GoogleCloudPlatform/ramble) commands on a target
+  [Ramble](https://github.com/Ramble-Project/ramble) commands on a target
   VM
 * **[ramble-setup]** ![community-badge] ![experimental-badge] : Creates a
   startup script to install
-  [Ramble](https://github.com/GoogleCloudPlatform/ramble) on an instance or a
+  [Ramble](https://github.com/Ramble-Project/ramble) on an instance or a
   slurm login or controller.
 * **[spack-setup]** ![community-badge] ![experimental-badge] : Creates a startup
   script to install [Spack](https://github.com/spack/spack) on an instance or a
@@ -284,15 +398,28 @@ Pub/Sub subscription. Primarily used for [FSI - MonteCarlo Tutorial][fsi-monteca
 ### Security
 
 * **[kubernetes-secret]** ![core-badge] : Creates a Kubernetes secret in a specified namespace on a given GKE cluster.
+* **[kms-key]** ![community-badge] ![experimental-badge] : Creates a Cloud KMS
+  key ring and symmetric CryptoKey for customer-managed encryption (CMEK).
+  Supports keys co-located with the workload or held in a dedicated key project.
+* **[kms-key-iam]** ![community-badge] ![experimental-badge] : Grants key-level
+  encrypt/decrypt access on a CryptoKey to the service agents that encrypt with
+  it. CMEK consumers should `use` this module, so they are ordered behind the
+  grants rather than merely behind the key.
+* **[pre-existing-kms-key]** ![community-badge] ![experimental-badge] : Looks up
+  a CryptoKey that already exists, for keys owned by a security team or created
+  outside Terraform. Interchangeable with kms-key downstream.
 
 [kubernetes-secret]: security/kubernetes-secret/README.md
+[kms-key]: ../community/modules/security/kms-key/README.md
+[kms-key-iam]: ../community/modules/security/kms-key-iam/README.md
+[pre-existing-kms-key]: ../community/modules/security/pre-existing-kms-key/README.md
 
 ## Module Fields
 
 ### ID (Required)
 
 The `id` field is used to uniquely identify and reference a defined module.
-ID's are used in [variables](../examples/README.md#variables) and become the
+ID's are used in [variables](../examples/README.md#variables-expressions-and-functions) and become the
 name of each module when writing the terraform `main.tf` file. They are also
 used in the [use](#use-optional) and [outputs](#outputs-optional) lists
 described below.
@@ -348,7 +475,7 @@ following module definition refers the local pre-existing-vpc modules.
 
 ```yaml
   - id: network1
-    source: modules/network/pre-existing-vpc
+    source: ./modules/network/pre-existing-vpc
 ```
 
 > **_NOTE:_** Relative paths (beginning with `.` or `..` must be relative to the
@@ -383,7 +510,7 @@ release of the filestore module:
 ```yaml
   - id: network1
     source: github.com/GoogleCloudPlatform/hpc-toolkit//modules/network/vpc?ref=develop
-  ...
+  # ...
   - id: homefs
     source: github.com/GoogleCloudPlatform/hpc-toolkit//modules/file-system/filestore?ref=v1.22.1&depth=1
 ```
@@ -436,7 +563,7 @@ gitlab, set the source to a path starting `git::`. Two Standard git protocols
 are supported, `git::https://` for HTTPS or `git::git@github.com` for SSH.
 
 Additional formatting and features after `git::` are identical to that of the
-[GitHub Modules](#github-modules) described above.
+[GitHub Modules](#github-hosted-modules-and-packages) described above.
 
 #### Google Cloud Storage Modules
 
@@ -481,7 +608,7 @@ modules:
   source: modules/compute/vm-instance
   use: [network1]
   settings:
-  ...
+    # ...
 ```
 
 In this snippet, the VM instance `workstation` uses the outputs of vpc
@@ -490,7 +617,7 @@ In this snippet, the VM instance `workstation` uses the outputs of vpc
 In this case both `network_self_link` and `subnetwork_self_link` in the
 [workstation settings](compute/vm-instance/README.md#Inputs) will be set
 to `$(network1.network_self_link)` and `$(network1.subnetwork_self_link)` which
-refer to the [network1 outputs](network/vpc/README#Outputs)
+refer to the [network1 outputs](network/vpc/README.md#Outputs)
 of the same names.
 
 The order of precedence that `gcluster` uses in determining when to infer a setting
@@ -526,7 +653,7 @@ vm-instance module:
     use:
     - network1
     settings:
-      machine_type: e2-medium
+      machine_type: n2d-standard-2
     outputs:
     - internal_ip
     - name: external_ip
@@ -541,10 +668,33 @@ Apply complete! Resources: 7 added, 0 changed, 0 destroyed.
 
 Outputs:
 
-external_ip_simplevm = <sensitive>
-internal_ip_simplevm = [
+external_ip_vm = <sensitive>
+internal_ip_vm = [
   "10.128.0.19",
 ]
+```
+
+### Reconfigure Ignores (Optional)
+
+The `reconfigure_ignores` field (`map[string][]string`) specifies Terraform
+resource attributes to add to or subtract from `lifecycle.ignore_changes` via an automatically
+generated `override.tf.json` file in the deployment directory. Keys can be a
+resource type (e.g. `google_compute_instance`, applying to all resources of that
+type in the module) or a specific `type.name` address (e.g.
+`google_compute_instance.controller`), and values are lists of attribute names
+to ignore across subsequent `gcluster deploy` re-runs, or prefixed with `-`
+(e.g. `"-node_config[0].labels"`) to selectively un-ignore attributes hardcoded
+in module defaults (the keyword `"all"` is not supported). `reconfigure_ignores`
+is supported on local and embedded `terraform` modules only:
+
+```yaml
+  - id: workstation
+    source: modules/compute/vm-instance
+    use: [network1]
+    reconfigure_ignores:
+      google_compute_instance:
+      - metadata
+      - boot_disk
 ```
 
 ### Required Services (APIs) (optional)

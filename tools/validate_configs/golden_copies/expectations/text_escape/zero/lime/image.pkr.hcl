@@ -96,11 +96,19 @@ locals {
 }
 
 source "googlecompute" "toolkit_image" {
-  communicator                = local.communicator
-  project_id                  = var.project_id
-  image_name                  = local.image_name
-  image_family                = local.image_family
-  image_labels                = local.labels
+  communicator = local.communicator
+  project_id   = var.project_id
+  image_name   = local.image_name
+  image_family = local.image_family
+  image_labels = local.labels
+
+  dynamic "image_encryption_key" {
+    for_each = var.image_encryption_key != null ? [var.image_encryption_key] : []
+    content {
+      kmsKeyName = image_encryption_key.value
+    }
+  }
+
   instance_name               = local.instance_name
   machine_type                = var.machine_type
   accelerator_type            = local.accelerator_type
@@ -113,6 +121,8 @@ source "googlecompute" "toolkit_image" {
   use_internal_ip             = var.omit_external_ip
   subnetwork                  = var.subnetwork_name
   network_project_id          = var.network_project_id
+  network_ip                  = var.network_ip
+  address                     = var.address
   service_account_email       = var.service_account_email
   scopes                      = var.service_account_scopes
   source_image                = var.source_image
@@ -213,7 +223,8 @@ build {
       "  export PATH=\"${local.override_gcloud_path}:\\$PATH\"",
       "fi",
       "if [[ -n \"${local.compute_version}\" ]]; then",
-      "  export CLOUDSDK_API_ENDPOINT_OVERRIDES_COMPUTE=\"https://www.googleapis.com/compute/${local.compute_version}/\"",
+      "  export CLOUDSDK_API_ENDPOINT_OVERRIDES_COMPUTE=\"https://compute.mtls.googleapis.com/compute/${local.compute_version}/\"",
+      "  export CLOUDSDK_API_CLIENT_OVERRIDES_COMPUTE=\"${local.compute_version}\"",
       "fi",
       "type -P gcloud > /dev/null || exit 0",
       "INST_ID=$(gcloud compute instances describe $INST_NAME --project $PRJ_ID --format=\"value(id)\" --zone=$ZONE)",

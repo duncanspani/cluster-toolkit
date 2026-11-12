@@ -15,9 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List
+from typing import Iterable, List, Optional, Set, Union
 
 import os
+import posixpath
+import random
+import socket
 import sys
 import stat
 import time
@@ -27,7 +30,7 @@ import uuid
 import shutil
 from pathlib import Path
 from concurrent.futures import as_completed
-from addict import Dict as NSDict # type: ignore
+from util import NSDict
 
 import util
 from util import NSMount, lookup, run, dirs, separate
@@ -99,12 +102,138 @@ def resolve_network_storage() -> List[NSMount]:
 
     return list(mounts.values())
 
-
 def is_controller_mount(mount) -> bool:
+    if not mount:
+        return False
+    if getattr(mount, "fs_type", None) == "gcsfuse":
+        return False
+    if not getattr(mount, "server_ip", None):
+        return lookup().is_controller
     # NOTE: Valid Lustre server_ip can take the form of '<IP>@tcp'
-    server_ip = mount.server_ip.split("@")[0]
-    mount_addr = util.host_lookup(server_ip)
-    return mount_addr == lookup().control_host_addr
+    server_ip = str(mount.server_ip).split("@")[0]
+    try:
+        mount_addr = util.host_lookup(server_ip) if server_ip else None
+    except Exception:
+        mount_addr = None
+    control_host = lookup().control_host
+    control_host_addr = lookup().control_host_addr
+    return (
+        (mount_addr is not None and mount_addr == control_host_addr)
+        or (control_host is not None and server_ip == control_host)
+        or (lookup().is_controller and (
+            server_ip in ("127.0.0.1", "localhost")
+            or server_ip == lookup().hostname
+            or mount_addr in ("127.0.0.1", "localhost")
+        ))
+    )
+
+
+def _is_controller_nfs_server(server: str, lkp: util.Lookup) -> bool:
+    """Check if an NFS server string refers to the controller without retrying DNS lookups."""
+    if not server:
+        return False
+    srv_fn = getattr(lkp, "controller_mount_server_ip", None)
+    host = getattr(lkp, "control_host", None)
+    addr = getattr(lkp, "control_addr", None)
+    for cand in (srv_fn() if callable(srv_fn) else None, host, addr):
+        if isinstance(cand, str) and cand and server == cand:
+            return True
+    try:
+        server_ip = socket.gethostbyname(server)
+    except OSError:
+        return False
+    if isinstance(addr, str) and addr and server_ip == addr:
+        return True
+    try:
+        return bool(isinstance(host, str) and host and server_ip == socket.gethostbyname(host))
+    except OSError:
+        return False
+
+
+def _probe_tcp_port(host: str, port: int = 2049, timeout: float = 1.0) -> bool:
+    """Check if TCP port is accepting connections (pure Python, IPv4/IPv6 compatible)."""
+    if not host or not host.strip():
+        return False
+    try:
+        with socket.create_connection((host.strip(), port), timeout=timeout):
+            return True
+    except (OSError, TypeError, OverflowError):
+        return False
+
+
+def _is_path_exported(expected_path: str, active_exports: Set[str]) -> bool:
+    """Check if expected_path matches an active export or is a subdirectory of one."""
+    if not expected_path or not expected_path.startswith("/"):
+        return False
+    norm_p = posixpath.normpath("/" + expected_path.lstrip("/"))
+    for exp in active_exports:
+        if exp and exp.startswith("/"):
+            norm_e = posixpath.normpath("/" + exp.lstrip("/"))
+            if norm_p == norm_e or norm_p.startswith(norm_e.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _check_nfs_exports_showmount(
+    server: str, expected_paths: Set[str], timeout: float = 3.0
+) -> Optional[bool]:
+    """Verify exports via showmount -e if available and port 111 is reachable."""
+    path_env = f"/usr/sbin:/sbin:{os.environ.get('PATH', '')}"
+    showmount_bin = shutil.which("showmount", path=path_env)
+    if not showmount_bin or not _probe_tcp_port(server, port=111, timeout=0.5):
+        return None
+    env = {**os.environ, "LC_ALL": "C", "PATH": path_env}
+    try:
+        res = run([showmount_bin, "--no-headers", "-e", server], timeout=timeout, check=False, env=env)
+        if res.returncode != 0:
+            return None
+        active_exports = {
+            posixpath.normpath("/" + line.split()[0].lstrip("/"))
+            for line in res.stdout.splitlines()
+            if line.strip() and not line.strip().startswith("Export list") and line.split()[0].startswith("/")
+        }
+        missing = {p for p in expected_paths if not _is_path_exported(p, active_exports)}
+        if not missing:
+            log.info(f"showmount confirmed exports {sorted(expected_paths)} on {server}.")
+            return True
+        log.debug(f"showmount exports on {server} missing expected shares: {sorted(missing)}")
+        return False
+    except Exception as e:
+        log.debug(f"showmount query on {server} failed with exception: {e}")
+        return None
+
+
+def wait_for_controller_nfs(
+    server: str, expected_paths: Iterable[Union[str, Path]], timeout: int = 600
+) -> bool:
+    """Wait for controller NFS server to accept TCP 2049 and export expected paths."""
+    if timeout <= 0:
+        log.warning(f"Invalid timeout {timeout}s waiting for controller NFS server '{server}'; skipping wait.")
+        return False
+
+    normalized = {posixpath.normpath("/" + str(p).lstrip("/")) for p in expected_paths if str(p)}
+    log.info(f"Waiting up to {timeout}s for controller NFS '{server}' to export {sorted(normalized)}...")
+    deadline = time.monotonic() + timeout
+    port_open = False
+
+    for wait in util.backoff_delay(min(1.5, float(timeout)), timeout=timeout):
+        if not port_open:
+            port_open = _probe_tcp_port(server, port=2049, timeout=1.0)
+            if port_open:
+                log.info(f"NFS TCP port 2049 is open on {server}.")
+        if port_open:
+            if not normalized or _check_nfs_exports_showmount(server, normalized, timeout=3.0) in (True, None):
+                log.info(f"Controller NFS exports confirmed ready on {server}.")
+                time.sleep(0.5)
+                return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(wait * random.uniform(0.8, 1.2), max(0.0, deadline - time.monotonic())))
+
+    reason = f"NFS port 2049 on {server}" if not port_open else f"controller '{server}' to export {sorted(normalized)}"
+    log.warning(f"Timed out after {timeout}s waiting for {reason}. Proceeding to standard mount retries.")
+    return False
+
 
 def setup_network_storage():
     """prepare network fs mounts and add them to fstab"""
@@ -115,6 +244,26 @@ def setup_network_storage():
         mounts, _ = separate(is_controller_mount, all_mounts)
     else:
         mounts = all_mounts
+
+    if not lookup().is_controller:
+        lkp = lookup()
+        key_mnt = lkp.slurm_key_mount if lkp.cfg.enable_slurm_auth else lkp.munge_mount
+        candidates = [*mounts, *([key_mnt] if key_mnt else [])]
+        controller_mounts: dict[str, set[str]] = {}
+        for m in candidates:
+            if (getattr(m, "fs_type", None) or "").lower() == "nfs" and m.server_ip:
+                server = str(m.server_ip).split("@")[0]
+                if _is_controller_nfs_server(server, lkp):
+                    controller_mounts.setdefault(server, set()).add(str(m.remote_mount))
+
+        raw_t = (
+            lkp.cfg.get("controller_startup_scripts_timeout")
+            if isinstance(lkp.cfg, dict)
+            else getattr(lkp.cfg, "controller_startup_scripts_timeout", None)
+        )
+        startup_t = int(raw_t) if isinstance(raw_t, (int, float)) and not isinstance(raw_t, bool) and raw_t > 0 else 300
+        for server, paths in controller_mounts.items():
+            wait_for_controller_nfs(server, paths, timeout=max(600, startup_t + 300))
 
     # Determine fstab entries and write them out
     fstab_entries = []
@@ -154,7 +303,7 @@ def setup_network_storage():
 
 def mount_fstab(mounts: list[NSMount], log):
     """Wait on each mount, then make sure all fstab is mounted"""
-    def mount_path(path: Path):
+    def mount_path(path: Path, mount_owner: Optional[str], mount_perm: Optional[str]):
         log.info(f"Waiting for '{path}' to be mounted...")
         try:
             run(f"mount {path}", timeout=120)
@@ -163,6 +312,29 @@ def mount_fstab(mounts: list[NSMount], log):
             log.error(f"mount of path '{path}' failed: {exc_type}: {e}")
             raise e
         log.info(f"Mount point '{path}' was mounted.")
+        if mount_owner and ":" in mount_owner:
+            user, group = mount_owner.split(":", 1)
+            uid: Union[int, str]
+            try:
+                uid = int(user)
+            except ValueError:
+                uid = user
+            gid: Union[int, str]
+            try:
+                gid = int(group)
+            except ValueError:
+                gid = group
+            try:
+                shutil.chown(path, user=uid, group=gid)
+                log.info(f"Mount point '{path}' changed owner to {user}:{group}.")
+            except LookupError as e:
+                log.error(f"Failed to resolve owner {user}:{group}: {e}")
+                raise e
+
+        if mount_perm:
+            mount_perm_int = int(mount_perm, 8)
+            os.chmod(path, mount_perm_int)
+            log.info(f"Mount point '{path}' changed mode to {mount_perm}.")
 
     MAX_MOUNT_TIMEOUT = 60 * 5
     future_list = []
@@ -173,7 +345,7 @@ def mount_fstab(mounts: list[NSMount], log):
         retry_policy=retry_policy
     ) as exe:
         for m in mounts:
-            future = exe.submit(mount_path, m.local_mount)
+            future = exe.submit(mount_path, m.local_mount, m.local_mount_owner, m.local_mount_permissions)
             future_list.append(future)
 
         # Iterate over futures, checking for exceptions
@@ -184,9 +356,37 @@ def mount_fstab(mounts: list[NSMount], log):
                 raise e
 
 
+def wait_for_file(file_path: Path, timeout: int = 300):
+    """Wait for a file to exist and be non-empty at the given path."""
+    log.info(f"Waiting up to {timeout}s for file to exist and be ready: {file_path}")
+
+    for retry, wait in enumerate(util.backoff_delay(1.0, timeout), 1):
+        try:
+            if file_path.exists() and file_path.stat().st_size > 0:
+                with open(file_path, 'rb') as f:
+                    f.read(1)
+                log.info(f"File found and verified: {file_path}")
+                return
+        except OSError as e:
+            log.warning(f"File {file_path} exists but is not ready (try {retry}): {e}")
+
+        if wait > 0:
+            time.sleep(wait)
+
+    raise TimeoutError(f"Timeout waiting for file to be ready: {file_path}")
+
+
 def munge_mount_handler():
     if lookup().is_controller:
         return
+
+    munge_key = Path(dirs.munge / "munge.key")
+    # Only in hybrid, elsewhere the controller can regenerate the key and a
+    # rebooting node has to pick the new one up.
+    if lookup().cfg.hybrid and munge_key.is_file():
+        log.info("Key already in place")
+        return
+
     mnt = lookup().munge_mount
 
     log.info(f"Mounting munge share to: {mnt.local_mount}")
@@ -222,9 +422,10 @@ def munge_mount_handler():
     else:
         raise err
 
-    munge_key = Path(dirs.munge / "munge.key")
+    src_key = Path(mnt.local_mount / "munge.key")
+    wait_for_file(src_key)
     log.info(f"Copy munge.key from: {mnt.local_mount}")
-    shutil.copy2(Path(mnt.local_mount / "munge.key"), munge_key)
+    shutil.copy2(src_key, munge_key)
 
     log.info("Restrict permissions of munge.key")
     shutil.chown(munge_key, user="munge", group="munge")
@@ -240,9 +441,18 @@ def munge_mount_handler():
 def slurm_key_mount_handler():
     if lookup().is_controller:
         return
+
+    file_name = "slurm.key"
+    slurm_key = Path(util.slurmdirs.etc / file_name)
+    # Only in hybrid, see the comment in munge_mount_handler.
+    if lookup().cfg.hybrid and slurm_key.is_file():
+        log.info("Key already in place")
+        return
+
     mnt = lookup().slurm_key_mount
 
     log.info(f"Mounting slurm_key share to: {mnt.local_mount}")
+    util.mkdirp(mnt.local_mount)
     if mnt.fs_type == "gcsfuse":
         cmd = [
             "gcsfuse",
@@ -258,7 +468,7 @@ def slurm_key_mount_handler():
             f"{mnt.server_ip}:{mnt.remote_mount}",
             str(mnt.local_mount),
         ]
-    timeout = 120 # wait max 120s to mount
+    timeout = 300 # wait max 300s to mount
     for retry, wait in enumerate(util.backoff_delay(0.5, timeout), 1):
         try:
             run(cmd, timeout=timeout)
@@ -273,13 +483,13 @@ def slurm_key_mount_handler():
     else:
         raise err
 
-    file_name = "slurm.key"
-    dst = Path(util.slurmdirs.etc / file_name)
+    src_key = mnt.local_mount / file_name
+    wait_for_file(src_key)
     log.info(f"Copy slurm.key from: {mnt.local_mount}")
-    shutil.copy2(mnt.local_mount / file_name, dst)
+    shutil.copy2(src_key, slurm_key)
 
     log.info("Restrict permissions of slurm.key")
-    util.chown_slurm(dst, mode=0o400)
+    util.chown_slurm(slurm_key, mode=0o400)
 
     log.info(f"Unmount {mnt.local_mount}")
     if mnt.fs_type == "gcsfuse":
@@ -314,8 +524,12 @@ def setup_nfs_exports():
 
     # export path if corresponding selector boolean is True
     lines = []
-    for path,options in to_export.items():
+    for path, options in to_export.items():
         util.mkdirp(Path(path))
+        try:
+            os.chmod(Path(path), 0o755)
+        except OSError as e:
+            log.warning(f"Failed to set permissions for {path}: {e}")
         run(rf"sed -i '\#{path}#d' /etc/exports", timeout=30)
         lines.append(f"{path}  {options}")
 
@@ -324,4 +538,4 @@ def setup_nfs_exports():
     with (exportsd / "slurm.exports").open("w") as f:
         f.write("\n")
         f.write("\n".join(lines))
-    run("exportfs -a", timeout=30)
+    run("exportfs -ra", timeout=30)

@@ -15,12 +15,16 @@
 */
 
 terraform {
-  required_version = "= 1.12.2"
+  required_version = ">= 1.12.2"
 
   required_providers {
     google = {
       source  = "hashicorp/google"
       version = ">= 6.41"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
     }
     google-beta = {
       source  = "hashicorp/google-beta"
@@ -28,6 +32,6 @@ terraform {
     }
   }
   provider_meta "google" {
-    module_name = "blueprints/terraform/hpc-toolkit:schedmd-slurm-gcp-v6-controller/v1.91.0"
+    module_name = "blueprints/terraform/hpc-toolkit:schedmd-slurm-gcp-v6-controller/v1.108.0"
   }
 }

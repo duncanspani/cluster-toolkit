@@ -104,6 +104,7 @@ locals {
         #!/bin/bash
         export FI_PROVIDER="verbs;ofi_rxm"
         export FI_OFI_RXM_USE_RNDV_WRITE=0
+        export FI_OFI_RXM_USE_SRX=0
         export FI_VERBS_INLINE_SIZE=39
         export I_MPI_FABRICS="shm:ofi"
         export FI_UNIVERSE_SIZE=1024
@@ -184,12 +185,24 @@ locals {
   ])
 
   install_ansible = coalesce(var.install_ansible, local.has_ansible_runners)
-  ansible_installer = local.install_ansible ? [{
-    type        = "shell"
-    source      = "${path.module}/files/install_ansible.sh"
-    destination = "install_ansible_automatic.sh"
-    args        = var.ansible_virtualenv_path
-  }] : []
+  ansible_installer = local.install_ansible ? [
+    {
+      type        = "file"
+      source      = "${path.module}/files/build-tools.txt"
+      destination = "build-tools.txt"
+    },
+    {
+      type        = "file"
+      source      = "${path.module}/files/install_ansible_requirements.txt"
+      destination = "install_ansible_requirements.txt"
+    },
+    {
+      type        = "shell"
+      source      = "${path.module}/files/install_ansible.sh"
+      destination = "install_ansible_automatic.sh"
+      args        = var.ansible_virtualenv_path
+    }
+  ] : []
 
   hotfix_runner = [{
     type        = "shell"

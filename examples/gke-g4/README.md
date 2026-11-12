@@ -12,10 +12,17 @@ This blueprint uses GKE to provision a Kubernetes cluster and a G4 node pool, al
 1. Install Cluster Toolkit
     1. Install [dependencies](https://cloud.google.com/cluster-toolkit/docs/setup/install-dependencies).
     1. Set up [Cluster Toolkit](https://cloud.google.com/cluster-toolkit/docs/setup/configure-environment).
-1. Switch to the Cluster Toolkit directory
+1. From the root of the [`cluster-toolkit`](https://github.com/GoogleCloudPlatform/cluster-toolkit) repository, enable the required GCP APIs and build `./gcluster` (if not already built):
 
    ```sh
-   cd cluster-toolkit
+   gcloud services enable \
+     compute.googleapis.com \
+     container.googleapis.com \
+     iam.googleapis.com \
+     storage.googleapis.com \
+     --project=<PROJECT_ID>
+
+   test -x ./gcluster || make
    ```
 
 1. Get the IP address for your host machine
@@ -44,15 +51,13 @@ This blueprint uses GKE to provision a Kubernetes cluster and a G4 node pool, al
     1. `deployment_name`: Name of the deployment.
     1. `region`: Compute region used for the deployment.
     1. `zone`: Compute zone used for the deployment.
-    1. `machine_type`: The VM shape. See allowed values at https://cloud.google.com/compute/docs/gpus#rtx-6000-gpus.
+    1. `compute_machine_type`: The VM shape. See allowed values at https://cloud.google.com/compute/docs/gpus#rtx-6000-gpus.
     1. `num_gpus`: Number of GPUS in the VM. Can be found at https://cloud.google.com/compute/docs/gpus#rtx-6000-gpus.
-    1. `static_node_count`: Number of nodes to create.
     1. `authorized_cidr`: update the IP address in `<your-ip-address>/32`.
-1. Build the Cluster Toolkit binary
 
-   ```sh
-   make
-   ```
+### Consumption Options
+
+Option 1 (Specific Reservation) is uncommented by default in `gke-g4-deployment.yaml`. To use another consumption model, comment out Option 1 and uncomment the desired option.
 
 1. Provision the GKE cluster
 
@@ -70,6 +75,15 @@ This blueprint uses GKE to provision a Kubernetes cluster and a G4 node pool, al
    ```
 
    Type `a` and hit enter to create the cluster.
+
+## Inference Benchmarks for GKE G4
+
+The [gke-inference-benchmarks](../../community/examples/gke-inference-benchmarks/README.md)
+directory contains community-maintained blueprints that run LLM inference
+benchmarks on G4. Each benchmark provisions a separate GKE cluster and G4 node
+pool, serves the model with vLLM and runs the benchmark with a single
+`gcluster deploy`. The first entry serves DiffusionGemma 26B-A4B on a Spot G4
+node pool.
 
 ## NCCL Tests for GKE G4
 
@@ -110,11 +124,63 @@ As RDMA networking and the Google gIB plugin are not supported for G4 machines, 
 
    You should see output indicating the bus bandwidth achieved during the `all_reduce_perf` test.
 
+## DWS Flex Start
+
+### Submit a job using DWS Flex Start
+
+1. Submit the DWS Flex Start job:
+
+   ```bash
+   kubectl apply -f examples/dws-sample-workloads/sample-job-flex.yaml
+   ```
+
+2. Monitor the job:
+
+   ```bash
+   kubectl get jobs
+   kubectl get pods
+   ```
+
+3. Clean up the job:
+
+   ```bash
+   kubectl delete -f examples/dws-sample-workloads/sample-job-flex.yaml
+   ```
+
+*Note: DWS Flex Start workloads require `nodeSelector: cloud.google.com/gke-flex-start: "true"`.*
+
+## DWS Flex Start + Queued Provisioning
+
+### Submit a job using Queued Provisioning
+
+1. Submit the Queued Provisioning job:
+
+   ```bash
+   kubectl apply -f examples/dws-sample-workloads/sample-job-flex-queue.yaml
+   ```
+
+2. Monitor the job:
+
+   ```bash
+   kubectl get jobs
+   kubectl get pods
+   ```
+
+3. Clean up the job:
+
+   ```bash
+   kubectl delete -f examples/dws-sample-workloads/sample-job-flex-queue.yaml
+   ```
+
+*Note: Queued Provisioning workloads require the label `kueue.x-k8s.io/queue-name: dws-local-queue` and annotation `provreq.kueue.x-k8s.io/maxRunDurationSeconds`.*
+
 ## Clean Up
 To destroy all resources associated with creating the GKE cluster, run the following command:
 
 ```sh
-./gcluster destroy CLUSTER-NAME
+./gcluster destroy DEPLOYMENT_NAME
 ```
 
-Replace `CLUSTER-NAME` with the name of your cluster. For the clusters created with Cluster Toolkit, the cluster name is based on the `deployment_name` used in vars in deployment file.
+Replace `DEPLOYMENT_NAME` with the `deployment_name` value specified in your deployment file (the deployment directory created by `gcluster`).
+
+**Note:** GCS buckets created for Terraform state are not deleted by the `./gcluster destroy` command and must be deleted manually.

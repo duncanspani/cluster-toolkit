@@ -17,9 +17,6 @@
 blueprint_name: hpc-slurm-qwiklab
 
 vars:
-  # Set to true to enable the secure Slurm Native Authentication standard.
-  # Default fallback remains false (MUNGE) to guarantee zero regression risk on upgrades.
-  enable_slurm_auth: true
   project_id:  ## Set GCP Project ID Here ##
   deployment_name: hpc-qwiklab
   region: us-central1
@@ -41,7 +38,7 @@ deployment_groups:
     use: [network]
     settings:
       node_count_dynamic_max: 4
-      machine_type: n2d-standard-2
+      machine_type: e2-standard-2
 
   - id: debug_partition
     source: community/modules/compute/schedmd-slurm-gcp-v6-partition
@@ -79,5 +76,6 @@ deployment_groups:
     - compute_partition
     - slurm_login
     settings:
+      enable_slurm_auth: true
       enable_controller_public_ips: true
-      machine_type: n2d-standard-4
+      machine_type: e2-standard-4

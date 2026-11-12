@@ -189,14 +189,14 @@ disk_size = 100
 In a blueprint, the equivalent syntax is:
 
 ```yaml
-...
+    # ...
     settings:
       startup_script: |
         #!/bin/bash
         yum install -y epel-release
         yum install -y jq
       disk_size: 100
-...
+    # ...
 ```
 
 ## Monitoring startup script execution
@@ -260,6 +260,7 @@ No resources.
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_accelerator_count"></a> [accelerator\_count](#input\_accelerator\_count) | Number of accelerator cards to attach to the VM; not necessary for families that always include GPUs (A2). | `number` | `null` | no |
 | <a name="input_accelerator_type"></a> [accelerator\_type](#input\_accelerator\_type) | Type of accelerator cards to attach to the VM; not necessary for families that always include GPUs (A2). | `string` | `null` | no |
+| <a name="input_address"></a> [address](#input\_address) | The name of a pre-allocated static external IP address. If specified, omit\_external\_ip must be set to false. | `string` | `null` | no |
 | <a name="input_ansible_playbooks"></a> [ansible\_playbooks](#input\_ansible\_playbooks) | A list of Ansible playbook configurations that will be uploaded to customize the VM image | <pre>list(object({<br/>    playbook_file   = string<br/>    galaxy_file     = string<br/>    extra_arguments = list(string)<br/>  }))</pre> | `[]` | no |
 | <a name="input_communicator"></a> [communicator](#input\_communicator) | Communicator to use for provisioners that require access to VM ("ssh" or "winrm") | `string` | `null` | no |
 | <a name="input_compute_endpoint_version"></a> [compute\_endpoint\_version](#input\_compute\_endpoint\_version) | Custom Google Compute API endpoint version. | `string` | `null` | no |
@@ -268,6 +269,7 @@ No resources.
 | <a name="input_disk_type"></a> [disk\_type](#input\_disk\_type) | Type of persistent disk to provision | `string` | `"pd-balanced"` | no |
 | <a name="input_enable_shielded_vm"></a> [enable\_shielded\_vm](#input\_enable\_shielded\_vm) | Enable the Shielded VM configuration (var.shielded\_instance\_config). | `bool` | `false` | no |
 | <a name="input_gcloud_path_override"></a> [gcloud\_path\_override](#input\_gcloud\_path\_override) | Path to the directory containing the gcloud binary to use as an override for local execution. | `string` | `""` | no |
+| <a name="input_image_encryption_key"></a> [image\_encryption\_key](#input\_image\_encryption\_key) | The full resource name of a Cloud KMS CryptoKey used to encrypt the<br/>produced image (CMEK). The Compute Engine service agent must hold<br/>roles/cloudkms.cryptoKeyEncrypterDecrypter on the key. | `string` | `null` | no |
 | <a name="input_image_family"></a> [image\_family](#input\_image\_family) | The family name of the image to be built. Defaults to `deployment_name` | `string` | `null` | no |
 | <a name="input_image_licenses"></a> [image\_licenses](#input\_image\_licenses) | List of licenses to apply to the image | `list(string)` | <pre>[<br/>  "projects/click-to-deploy-images/global/licenses/hpc-toolkit-vm-image"<br/>]</pre> | no |
 | <a name="input_image_name"></a> [image\_name](#input\_image\_name) | The name of the image to be built. If not supplied, it will be set to image\_family-$ISO\_TIMESTAMP | `string` | `null` | no |
@@ -276,6 +278,7 @@ No resources.
 | <a name="input_machine_type"></a> [machine\_type](#input\_machine\_type) | VM machine type on which to build new image | `string` | `"n2-standard-4"` | no |
 | <a name="input_manifest_file"></a> [manifest\_file](#input\_manifest\_file) | File to which to write Packer build manifest | `string` | `"packer-manifest.json"` | no |
 | <a name="input_metadata"></a> [metadata](#input\_metadata) | Instance metadata for the builder VM (use var.startup\_script or var.startup\_script\_file to set startup-script metadata) | `map(string)` | `{}` | no |
+| <a name="input_network_ip"></a> [network\_ip](#input\_network\_ip) | The network IP address reserved to use for the launched instance | `string` | `null` | no |
 | <a name="input_network_project_id"></a> [network\_project\_id](#input\_network\_project\_id) | Project ID of Shared VPC network | `string` | `null` | no |
 | <a name="input_omit_external_ip"></a> [omit\_external\_ip](#input\_omit\_external\_ip) | Provision the image building VM without a public IP address | `bool` | `true` | no |
 | <a name="input_on_host_maintenance"></a> [on\_host\_maintenance](#input\_on\_host\_maintenance) | Describes maintenance behavior for the instance. If left blank this will default to `MIGRATE` except the use of GPUs requires it to be `TERMINATE` | `string` | `null` | no |
@@ -287,7 +290,7 @@ No resources.
 | <a name="input_shell_scripts"></a> [shell\_scripts](#input\_shell\_scripts) | A list of paths to local shell scripts which will be uploaded to customize the VM image | `list(string)` | `[]` | no |
 | <a name="input_shielded_instance_config"></a> [shielded\_instance\_config](#input\_shielded\_instance\_config) | Shielded VM configuration for the instance (must set var.enabled\_shielded\_vm) | <pre>object({<br/>    enable_secure_boot          = bool<br/>    enable_vtpm                 = bool<br/>    enable_integrity_monitoring = bool<br/>  })</pre> | <pre>{<br/>  "enable_integrity_monitoring": true,<br/>  "enable_secure_boot": true,<br/>  "enable_vtpm": true<br/>}</pre> | no |
 | <a name="input_source_image"></a> [source\_image](#input\_source\_image) | Source OS image to build from | `string` | `null` | no |
-| <a name="input_source_image_family"></a> [source\_image\_family](#input\_source\_image\_family) | Alternative to source\_image. Specify image family to build from latest image in family | `string` | `"hpc-rocky-linux-8"` | no |
+| <a name="input_source_image_family"></a> [source\_image\_family](#input\_source\_image\_family) | Alternative to source\_image. Specify image family to build from latest image in family | `string` | `"hpc-rocky-linux-9"` | no |
 | <a name="input_source_image_project_id"></a> [source\_image\_project\_id](#input\_source\_image\_project\_id) | A list of project IDs to search for the source image. Packer will search the<br/>first project ID in the list first, and fall back to the next in the list,<br/>until it finds the source image. | `list(string)` | `null` | no |
 | <a name="input_ssh_username"></a> [ssh\_username](#input\_ssh\_username) | Username to use for SSH access to VM | `string` | `"hpc-toolkit-packer"` | no |
 | <a name="input_startup_script"></a> [startup\_script](#input\_startup\_script) | Startup script (as raw string) used to build the custom Linux VM image (overridden by var.startup\_script\_file if both are set) | `string` | `null` | no |

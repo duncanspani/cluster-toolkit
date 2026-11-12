@@ -88,17 +88,10 @@ storage intact and b) you can build software before you deploy your cluster.
 > However, this is merely an example sizing for an instance of this reference architecture.
 > Node counts and remote desktop seats can easily be adjusted in the blueprint.
 
-1. Clone the repo
+1. From the root of the [`cluster-toolkit`](https://github.com/GoogleCloudPlatform/cluster-toolkit) repository, build `./gcluster` (if not already built):
 
    ```bash
-   git clone https://github.com/GoogleCloudPlatform/cluster-toolkit.git
-   cd cluster-toolkit
-   ```
-
-1. Build the Cluster Toolkit
-
-   ```bash
-   make
+   test -x ./gcluster || make
    ```
 
 1. Generate the deployment folder after replacing `<project>` with the project
@@ -162,7 +155,7 @@ storage intact and b) you can build software before you deploy your cluster.
    through Slurm.
 
    - Follow
-     [the instructions](../README.md#hpc-slurm-chromedesktopyaml--)
+     [the instructions](../../community/modules/remote-desktop/chrome-remote-desktop/README.md)
      for setting up the Remote Desktop.
 
 ## Teardown Instructions
@@ -202,12 +195,12 @@ Depending on the software you want to use, different installation paths may be r
   that illustrate this process.
 
   In general, you need to bring the binaries to your CAE cluster for which it is
-  useful to use a Google Clouds Storage bucket, which is accessible from any machine using the
-  gsutil command and which can be mounted in the cluster.
+  useful to use a Google Cloud Storage bucket, which is accessible from any machine using the
+  `gcloud storage` commands or mounted directly in the cluster.
 
   As this installation process only needs to be done once and at the same time may require time,
   we recommend to do this installation in a separate deployment group before you bring up the cluster.
-  The `software_installation' stage is meant to accommodate this. You can for example bring up
+  The `software_installation` stage is meant to accommodate this. You can for example bring up
   a dedicated VM
 
   ``` {.yaml}
@@ -222,7 +215,7 @@ Depending on the software you want to use, different installation paths may be r
   ```
 
   where you can follow the installation steps manually. Or using the toolkit's
-  [startup-script](../../modules/scripts/startup-scripts/README.md) module, the process
+  [startup-script](../../modules/scripts/startup-script/README.md) module, the process
   can be automated.
 
   Once that is completed, the software will persist on the NFS Filestore share for as long as you
@@ -239,8 +232,8 @@ Depending on the software you want to use, different installation paths may be r
   to install all dependencies for a particular version of the software, including compiling
   the software or its dependencies from source.
 
-  Please also see the [OpenFOAM](../../docs/tutorials/openfoam/spack-openfoam.md) example
-  for how this can be used to install the OpenFOAM software.
+  Please also see the [GROMACS](../../docs/tutorials/gromacs/spack-gromacs.md) example
+  for how this can be used to install scientific software using Spack.
 
   Once that is completed, the software will persist on the NFS Filestore share for as long as you
   do not destroy the `setup` stage.

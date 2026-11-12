@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"hpc-toolkit/pkg/config"
+	"hpc-toolkit/pkg/dependencies"
 	"hpc-toolkit/pkg/logging"
 	"hpc-toolkit/pkg/modulereader"
 	"strings"
@@ -27,10 +28,22 @@ import (
 )
 
 func projectError(p string) error {
+	hint := "It is possible the machine you are working on has not been authenticated.\n"
+	if dependencies.HasBinary("gcloud") {
+		hint += "Try to run `gcloud auth application-default login`"
+	} else {
+		hint += "How to fix:\n" +
+			"1. Recommended: Install the Google Cloud SDK and authenticate.\n" +
+			"   -> Install: https://cloud.google.com/sdk/docs/install\n" +
+			"   -> Authenticate: Run `gcloud auth application-default login`\n\n" +
+			"2. Alternative: Use a Service Account Key file (Air-gapped/Minimal VMs).\n" +
+			"   -> Set the environment variable:\n" +
+			"      export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/your/key.json\""
+	}
+
 	return config.HintError{
-		Err: fmt.Errorf("project %q does not exist or your credentials do not have permission to access it", p),
-		Hint: "It is possible the machine you are working on has not been authenticated.\n" +
-			"Try to run `gcloud auth application-default login`",
+		Err:  fmt.Errorf("project %q does not exist or your credentials do not have permission to access it", p),
+		Hint: hint,
 	}
 }
 
@@ -75,7 +88,6 @@ const (
 	testMachineTypeInZone             = "test_machine_type_in_zone"
 	testReservationExistsName         = "test_reservation_exists"
 	testDiskTypeInZone                = "test_disk_type_in_zone"
-	testGCSFuseIAMRoleExistsName      = "test_gcsfuse_iam_role_exists"
 )
 
 func implementations() map[string]func(config.Blueprint, config.Dict) error {
@@ -91,7 +103,6 @@ func implementations() map[string]func(config.Blueprint, config.Dict) error {
 		testMachineTypeInZone:             testMachineTypeInZoneAvailability,
 		testReservationExistsName:         testReservationExists,
 		testDiskTypeInZone:                testDiskTypeInZoneAvailability,
-		testGCSFuseIAMRoleExistsName:      testGCSFuseIAMRoleExists,
 	}
 }
 
@@ -153,6 +164,7 @@ func Execute(bp config.Blueprint) error {
 
 // validateBlueprintWithMetadata runs metadata-based validations.
 func validateBlueprintWithMetadata(bp config.Blueprint) error {
+	errs := config.Errors{}
 	for _, group := range bp.Groups {
 		for j, mod := range group.Modules {
 			if mod.Kind != config.TerraformKind {
@@ -178,12 +190,12 @@ func validateBlueprintWithMetadata(bp config.Blueprint) error {
 						logging.Error("WARNING: validation failed for module %q: %v", mod.ID, err)
 						continue
 					}
-					return err
+					_ = errs.Add(err)
 				}
 			}
 		}
 	}
-	return nil
+	return errs.OrNil()
 }
 
 func checkInputs(inputs config.Dict, required []string) error {
@@ -207,29 +219,23 @@ func checkInputs(inputs config.Dict, required []string) error {
 	return nil
 }
 
-// Helper function to sure that all input values are strings.
+// Helper function to ensure that all input values are known non-null strings.
 func inputsAsStrings(inputs config.Dict) (map[string]string, error) {
 	ms := map[string]string{}
 	for k, v := range inputs.Items() {
-		if v.Type() != cty.String {
-			return nil, fmt.Errorf("validator inputs must be strings, %s is a %s", k, v.Type())
+		if v == cty.NilVal {
+			return nil, fmt.Errorf("validator input %s must be a known non-null string", k)
 		}
-		ms[k] = v.AsString()
+		u, _ := v.Unmark()
+		if u.Type() != cty.String {
+			return nil, fmt.Errorf("validator inputs must be strings, %s is a %s", k, u.Type().FriendlyName())
+		}
+		if u.IsNull() || !u.IsKnown() {
+			return nil, fmt.Errorf("validator input %s must be a known non-null string", k)
+		}
+		ms[k] = u.AsString()
 	}
 	return ms, nil
-}
-
-func blueprintHasGCSFuse(bp config.Blueprint) bool {
-	hasGCSFuse := false
-	bp.WalkModulesSafe(func(_ config.ModulePath, mod *config.Module) {
-		if strings.Contains(mod.Source, "gke-persistent-volume") && mod.Settings.Has("gcsfuse_storage_class_name") {
-			v := mod.Settings.Get("gcsfuse_storage_class_name")
-			if !v.IsNull() && v.Type() == cty.String && v.AsString() != "" {
-				hasGCSFuse = true
-			}
-		}
-	})
-	return hasGCSFuse
 }
 
 // Creates a list of default validators for the given blueprint,
@@ -260,13 +266,6 @@ func defaults(bp config.Blueprint) []config.Validator {
 			Validator: testApisEnabledName,
 			Inputs:    inputs,
 		})
-
-		if blueprintHasGCSFuse(bp) {
-			defaults = append(defaults, config.Validator{
-				Validator: testGCSFuseIAMRoleExistsName,
-				Inputs:    inputs,
-			})
-		}
 	}
 
 	if projectIDExists && regionExists {
@@ -299,22 +298,8 @@ func defaults(bp config.Blueprint) []config.Validator {
 				"zone":       zoneRef,
 			}),
 		})
-		for _, varName := range bp.Vars.Keys() {
-			if resKeyRegex.MatchString(varName) {
-				resRef := config.GlobalRef(varName).AsValue()
-
-				// Automatically add a reservation check for every detected reservation variable
-				defaults = append(defaults, config.Validator{
-					Validator: testReservationExistsName,
-					Inputs: config.NewDict(map[string]cty.Value{
-						"project_id":       projectRef,
-						"zone":             zoneRef,
-						"reservation_name": resRef,
-					}),
-				})
-			}
-		}
 	}
+	defaults = append(defaults, defaultReservationValidators(bp)...)
 
 	if projectIDExists && regionExists && zoneExists {
 		defaults = append(defaults, config.Validator{

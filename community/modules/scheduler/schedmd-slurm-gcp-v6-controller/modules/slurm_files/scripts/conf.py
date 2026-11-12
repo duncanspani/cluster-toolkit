@@ -26,8 +26,10 @@ import uuid
 import util
 from util import dirs, slurmdirs
 import tpu
-from addict import Dict as NSDict # type: ignore
+from util import NSDict
 import yaml
+import socket
+import time
 
 
 FILE_PREAMBLE = """
@@ -56,118 +58,327 @@ def dict_to_conf(conf, delim=" ") -> str:
         f"{k}={v}" for k, v in map(filter_conf, conf.items()) if v is not None
     )
 
-def topology_type(lkp: util.Lookup, partition: NSDict) -> str:
+def cloud_param(lkp: util.Lookup, key: str, default: Any) -> Any:
     """
-    Returns configured topology type for a given partition.
+    Returns the value of the key in cloud_parameters if it exists and is not None,
+    otherwise returns supplied default.
+    We can't rely on the `dict.get` method because the value could be `None` as
+    well as empty NSDict, depending on type of the `cfg.cloud_parameters`.
+    TODO: Simplify once NSDict is removed from the codebase.
     """
-    if lkp.has_block_topology(partition):
-        if util.slurm_version_gte(lkp.slurm_version, "25.05"):
-            log.info(f"Partition {partition.partition_name} is using block topology")
-            return TOPOLOGY_BLOCK
-        else:
-            log.info(f"Slurm version < 25.05, falling back to tree topology for Partition {partition.partition_name}")
-    else:
-        log.info(f"Partition {partition.partition_name} is using tree topology")
-    return TOPOLOGY_TREE
+    params = lkp.cfg.cloud_parameters
+    if not params or key not in params or params[key] is None:
+        return default
+    return params[key]
 
 def topology_plugin(lkp: util.Lookup) -> str:
     """
     Returns configured topology plugin, defaults to `topology/tree`.
     """
-    cp, key = lkp.cfg.cloud_parameters, "topology_plugin"
-    if key not in cp or cp[key] is None:
+    return cloud_param(lkp, "topology_plugin", TOPOLOGY_TREE)
+
+class SlurmConfigGenerator:
+    """Base Slurm configuration generator. Represents Slurm 25.05 baseline."""
+
+    def __init__(self, lkp: util.Lookup):
+        self.lkp = lkp
+
+
+    @property
+    def supports_block_topology(self) -> bool:
+        return True
+
+    @property
+    def supports_partition_topology(self) -> bool:
+        return True
+
+    @property
+    def use_gpu_type(self) -> bool:
+        return True
+
+    def topology_type(self, partition: NSDict) -> str:
+        """
+        Returns configured topology type for a given partition.
+        """
+        if self.lkp.has_block_topology(partition):
+            if self.supports_block_topology:
+                log.info(f"Partition {partition.partition_name} is using block topology")
+                return TOPOLOGY_BLOCK
+            else:
+                log.info(f"Block topology not supported, falling back to tree topology for Partition {partition.partition_name}")
+        else:
+            log.info(f"Partition {partition.partition_name} is using tree topology")
         return TOPOLOGY_TREE
-    return cp[key]
+
+    def get_conf_options(self) -> dict:
+        def get(key, default):
+            return cloud_param(self.lkp, key, default)
+
+        no_comma_params = get("no_comma_params", False)
+
+        any_gpus = any(
+            getattr(self.lkp.template_info(nodeset.instance_template), "gpu", None)
+            for nodeset in self.lkp.cfg.nodeset.values()
+        )
+
+        any_tpu = any(
+            tpu_nodeset is not None
+            for part in self.lkp.cfg.partitions.values()
+            for tpu_nodeset in part.partition_nodeset_tpu
+        )
+
+        any_gke = any(
+            self.lkp.nodeset_is_gke(nodeset)
+            for nodeset in self.lkp.cfg.nodeset.values()
+        )
+
+        any_dynamic = any(bool(p.partition_feature) for p in self.lkp.cfg.partitions.values())
+        comma_params = {
+            "LaunchParameters": [
+                "enable_nss_slurm",
+                "use_interactive_step",
+            ],
+            "SlurmctldParameters": [
+                "cloud_dns" if not(any_dynamic or any_tpu or any_gke or self.lkp.cfg.hybrid) else None,
+                "enable_configless",
+                "idle_on_node_suspend",
+            ],
+            "GresTypes": [
+                "gpu" if any_gpus else None,
+            ],
+        }
+
+        scripts_dir = self.lkp.cfg.install_dir or dirs.scripts
+        prolog_path = Path(dirs.custom_scripts / "prolog.d")
+        epilog_path = Path(dirs.custom_scripts / "epilog.d")
+        task_prolog_path = Path(dirs.custom_scripts / "task_prolog.d")
+        task_epilog_path = Path(dirs.custom_scripts / "task_epilog.d")
+        default_tree_width = 65533 if any_dynamic else 128
+
+        return {
+            **(comma_params if not no_comma_params else {}),
+            "Prolog": f"{prolog_path}/*" if self.lkp.cfg.prolog_scripts else None,
+            "Epilog": f"{epilog_path}/*" if self.lkp.cfg.epilog_scripts else None,
+            "TaskProlog": f"{task_prolog_path}/task-prolog" if self.lkp.cfg.task_prolog_scripts else None,
+            "TaskEpilog": f"{task_epilog_path}/task-epilog" if self.lkp.cfg.task_epilog_scripts else None,
+            "PrologFlags": get("prolog_flags", None),
+            "SwitchType": get("switch_type", None),
+            "PrivateData": get("private_data", []),
+            "SchedulerParameters": get("scheduler_parameters", [
+                "bf_continue",
+                "salloc_wait_nodes",
+                "ignore_prefer_validation",
+            ]),
+            "ResumeProgram": f"{scripts_dir}/resume_wrapper.sh",
+            "ResumeFailProgram": f"{scripts_dir}/suspend_wrapper.sh",
+            "ResumeRate": get("resume_rate", 0),
+            "ResumeTimeout": get("resume_timeout", 300),
+            "SuspendProgram": f"{scripts_dir}/suspend_wrapper.sh",
+            "SuspendRate": get("suspend_rate", 0),
+            "SuspendTimeout": get("suspend_timeout", 300),
+            "SlurmdTimeout": get("slurmd_timeout", 300),
+            "UnkillableStepTimeout": get("unkillable_step_timeout", 300),
+            "TreeWidth": get("tree_width", default_tree_width),
+            "JobSubmitPlugins": "lua" if any_tpu else None,
+            "TopologyPlugin": topology_plugin(self.lkp) if self.lkp.cfg.nodeset else None,
+            "TopologyParam": get("topology_param", "SwitchAsNodeRank"),
+        }
+
+    def conflines(self) -> str:
+        conf_options = self.get_conf_options()
+        return dict_to_conf(conf_options, delim="\n")
+
+    def make_cloud_conf(self) -> str:
+        """generate cloud.conf snippet"""
+        lines = [
+            FILE_PREAMBLE,
+            self.conflines(),
+            *(nodeset_lines(n, self.lkp) for n in self.lkp.cfg.nodeset.values()),
+            *(nodeset_dyn_lines(n) for n in self.lkp.cfg.nodeset_dyn.values()),
+            *(nodeset_tpu_lines(n, self.lkp) for n in self.lkp.cfg.nodeset_tpu.values()),
+            *(self.partitionlines(p) for p in self.lkp.cfg.partitions.values()),
+            *(suspend_exc_lines(self.lkp)),
+        ]
+        return "\n\n".join(filter(None, lines))
+
+    def gen_cloud_conf(self) -> None:
+        content = self.make_cloud_conf()
+        conf_file = self.lkp.etc_dir / "cloud.conf"
+        conf_file.write_text(content)
+        util.chown_slurm(conf_file, mode=0o644)
+
+    def generate_topology_data(self) -> Tuple[bool, Any]:
+        return gen_topology_yaml(self.lkp)
+
+    def generate_topology(self) -> None:
+        if self.lkp.cfg.nodeset:
+            _, summary = self.generate_topology_data()
+            summary.dump(self.lkp)
+            install_topology_yaml(self.lkp)
+
+    def install_jobsubmit_lua(self) -> None:
+        install_jobsubmit_lua(self.lkp)
+
+    def install_slurm_conf(self) -> None:
+        install_slurm_conf(self.lkp)
+
+    def install_slurmdbd_conf(self) -> None:
+        install_slurmdbd_conf(self.lkp)
+
+    def gen_cloud_gres_conf(self) -> None:
+        """create cloud_gres.conf file"""
+        content = FILE_PREAMBLE + self.gen_cloud_gres_conf_lines()
+        conf_file = self.lkp.etc_dir / "cloud_gres.conf"
+        conf_file.write_text(content)
+        util.chown_slurm(conf_file, mode=0o600)
+
+    def install_gres_conf(self) -> None:
+        install_gres_conf(self.lkp)
+
+    def install_cgroup_conf(self) -> None:
+        install_cgroup_conf(self.lkp)
+
+    def partitionlines(self, partition) -> str:
+        """Make a partition line for the slurm.conf"""
+        MIN_MEM_PER_CPU = 100
+
+        def defmempercpu(nodeset_name: str) -> int:
+            nodeset = self.lkp.cfg.nodeset.get(nodeset_name)
+            if not nodeset:
+                return MIN_MEM_PER_CPU
+            machine = self.lkp.nodeset_machine_conf(nodeset)
+            mem_spec_limit = int(nodeset.node_conf.get("MemSpecLimit", 0))
+            return max(MIN_MEM_PER_CPU, (machine.memory - mem_spec_limit) // machine.cpus)
+
+        defmem = min(
+            map(defmempercpu, partition.partition_nodeset), default=MIN_MEM_PER_CPU
+        )
+
+        regular = partition.partition_nodeset
+        if cloud_param(self.lkp, "skip_nodeset_lines", False):
+            regular = filter(None, (
+                self.lkp.nodelist(self.lkp.cfg.nodeset[n])
+                for n in partition.partition_nodeset
+            ))
+        nodesets = list(
+            chain(
+                regular,
+                partition.partition_nodeset_dyn,
+                partition.partition_nodeset_tpu,
+            )
+        )
+
+        is_tpu = len(partition.partition_nodeset_tpu) > 0
+        is_dyn = len(partition.partition_nodeset_dyn) > 0
+
+        oversub_exlusive = partition.enable_job_exclusive or is_tpu
+        power_down_on_idle = partition.enable_job_exclusive and not is_dyn
+
+        line_elements = {
+            "PartitionName": partition.partition_name,
+            "Nodes": ",".join(nodesets),
+            "State": "UP",
+            "DefMemPerCPU": defmem,
+            "SuspendTime": 300,
+            "Oversubscribe": "Exclusive" if oversub_exlusive else None,
+            "PowerDownOnIdle": "YES" if power_down_on_idle else None,
+            **partition.partition_conf,
+        }
+        
+        if self.supports_partition_topology and self.lkp.cfg.nodeset:
+            line_elements["Topology"] = self.topology_type(partition) 
+
+        return dict_to_conf(line_elements)
+
+    def gen_cloud_gres_conf_lines(self) -> str:
+        """generate cloud_gres.conf's content"""
+
+        use_gpu_type = self.use_gpu_type
+
+        lines = []
+        if use_gpu_type:
+            gpu_nodes_with_type: defaultdict[Tuple[int, Optional[str]], List[str]] = defaultdict(list)
+            for nodeset in self.lkp.cfg.nodeset.values():
+                ti = self.lkp.template_info(nodeset.instance_template)
+                gpu_attr = getattr(ti, "gpu", None)
+                gpu_count = gpu_attr.count if gpu_attr else 0
+                gpu_type = gpu_attr.type if gpu_attr else None
+                if gpu_count:
+                    key_with_type = (gpu_count, gpu_type)
+                    gpu_nodes_with_type[key_with_type].append(self.lkp.nodelist(nodeset))
+            
+            for (gpu_count, gpu_type), names in gpu_nodes_with_type.items():
+                lines.append(dict_to_conf({
+                    "NodeName": names,
+                    "Name": "gpu",
+                    "Type": gpu_type,
+                    "File": f"/dev/nvidia[0-{gpu_count-1}]" if gpu_count > 1 else "/dev/nvidia0",
+                }))
+        else:
+            gpu_nodes_without_type: defaultdict[int, List[str]] = defaultdict(list)
+            for nodeset in self.lkp.cfg.nodeset.values():
+                ti = self.lkp.template_info(nodeset.instance_template)
+                gpu_attr = getattr(ti, "gpu", None)
+                gpu_count = gpu_attr.count if gpu_attr else 0
+                # gpu_type is not used in this branch, but is needed for template_info to be consistent
+                gpu_type = gpu_attr.type if gpu_attr else None 
+                if gpu_count:
+                    key_without_type: int = gpu_count # Explicitly type key as int
+                    gpu_nodes_without_type[key_without_type].append(self.lkp.nodelist(nodeset))
+            
+            for gpu_count, names in gpu_nodes_without_type.items():
+                lines.append(dict_to_conf({
+                    "NodeName": names,
+                    "Name": "gpu",
+                    "File": f"/dev/nvidia[0-{gpu_count-1}]" if gpu_count > 1 else "/dev/nvidia0",
+                }))
+        
+        lines.append("\n")
+        return "\n".join(lines)
+
+    def generate_configs(self) -> None:
+        self.install_slurm_conf()
+        if not self.lkp.is_hybrid_setup:
+            self.install_slurmdbd_conf()
+        self.gen_cloud_conf()
+        self.gen_cloud_gres_conf()
+        self.install_gres_conf()
+        self.install_cgroup_conf()
+        self.install_jobsubmit_lua()
+        self.generate_topology()
+
+def get_generator(lkp: util.Lookup) -> SlurmConfigGenerator:
+    """Factory function to return the correct Slurm config generator version."""
+    if util.slurm_version_gte(lkp.slurm_version, "26.05"):
+        from conf_v2605 import SlurmConfigGeneratorV2605
+        return SlurmConfigGeneratorV2605(lkp)
+
+    if lkp.has_tpu_nodesets():
+        log.warning(
+            f"GCE TPU nodesets are configured, but native TPU support "
+            f"is not supported on Slurm {lkp.slurm_version} (requires >= 26.05)."
+        )
+
+    if util.slurm_version_gte(lkp.slurm_version, "25.11"):
+        from conf_v2511 import SlurmConfigGeneratorV2511
+        return SlurmConfigGeneratorV2511(lkp)
+    elif util.slurm_version_gte(lkp.slurm_version, "25.05"):
+        return SlurmConfigGenerator(lkp)
+    else:
+        from conf_v2411 import SlurmConfigGeneratorV2411
+        return SlurmConfigGeneratorV2411(lkp)
+
+def generate_configs_slurm_v2505(lkp: util.Lookup) -> None:
+    """Preserved for backward compatibility."""
+    get_generator(lkp).generate_configs()
 
 def conflines(lkp: util.Lookup) -> str:
-    params = lkp.cfg.cloud_parameters
-    def get(key, default):
-        """
-        Returns the value of the key in params if it exists and is not None,
-        otherwise returns supplied default.
-        We can't rely on the `dict.get` method because the value could be `None` as
-        well as empty NSDict, depending on type of the `cfg.cloud_parameters`.
-        TODO: Simplify once NSDict is removed from the codebase.
-        """
-        if key not in params or params[key] is None:
-            return default
-        return params[key]
-
-    no_comma_params = get("no_comma_params", False)
-
-    any_gpus = any(
-        lkp.template_info(nodeset.instance_template).gpu
-        for nodeset in lkp.cfg.nodeset.values()
-    )
-
-    any_tpu = any(
-        tpu_nodeset is not None
-        for part in lkp.cfg.partitions.values()
-        for tpu_nodeset in part.partition_nodeset_tpu
-    )
-
-    any_gke = any(
-        lkp.nodeset_is_gke(nodeset)
-        for nodeset in lkp.cfg.nodeset.values()
-    )
-
-    any_dynamic = any(bool(p.partition_feature) for p in lkp.cfg.partitions.values())
-    comma_params = {
-        "LaunchParameters": [
-            "enable_nss_slurm",
-            "use_interactive_step",
-        ],
-        "SlurmctldParameters": [
-            "cloud_dns" if not(any_dynamic or any_tpu or any_gke) else None,
-            "enable_configless",
-            "idle_on_node_suspend",
-        ],
-        "GresTypes": [
-            "gpu" if any_gpus else None,
-        ],
-    }
-
-    scripts_dir = lkp.cfg.install_dir or dirs.scripts
-    prolog_path = Path(dirs.custom_scripts / "prolog.d")
-    epilog_path = Path(dirs.custom_scripts / "epilog.d")
-    task_prolog_path = Path(dirs.custom_scripts / "task_prolog.d")
-    task_epilog_path = Path(dirs.custom_scripts / "task_epilog.d")
-    default_tree_width = 65533 if any_dynamic else 128
-
-    conf_options = {
-        **(comma_params if not no_comma_params else {}),
-        "Prolog": f"{prolog_path}/*" if lkp.cfg.prolog_scripts else None,
-        "Epilog": f"{epilog_path}/*" if lkp.cfg.epilog_scripts else None,
-        "TaskProlog": f"{task_prolog_path}/task-prolog" if lkp.cfg.task_prolog_scripts else None,
-        "TaskEpilog": f"{task_epilog_path}/task-epilog" if lkp.cfg.task_epilog_scripts else None,
-        "PrologFlags": get("prolog_flags", None),
-        "SwitchType": get("switch_type", None),
-        "PrivateData": get("private_data", []),
-        "SchedulerParameters": get("scheduler_parameters", [
-            "bf_continue",
-            "salloc_wait_nodes",
-            "ignore_prefer_validation",
-        ]),
-        "ResumeProgram": f"{scripts_dir}/resume_wrapper.sh",
-        "ResumeFailProgram": f"{scripts_dir}/suspend_wrapper.sh",
-        "ResumeRate": get("resume_rate", 0),
-        "ResumeTimeout": get("resume_timeout", 300),
-        "SuspendProgram": f"{scripts_dir}/suspend_wrapper.sh",
-        "SuspendRate": get("suspend_rate", 0),
-        "SuspendTimeout": get("suspend_timeout", 300),
-        "SlurmdTimeout": get("slurmd_timeout", 300),
-        "UnkillableStepTimeout": get("unkillable_step_timeout", 300),
-        "TreeWidth": get("tree_width", default_tree_width),
-        "JobSubmitPlugins": "lua" if any_tpu else None,
-        "TopologyPlugin": topology_plugin(lkp) if lkp.cfg.nodeset else None,
-        "TopologyParam": get("topology_param", "SwitchAsNodeRank"),
-    }
-    return dict_to_conf(conf_options, delim="\n")
+    return get_generator(lkp).conflines()
 
 
 def nodeset_lines(nodeset, lkp: util.Lookup) -> str:
     template_info = lkp.template_info(nodeset.instance_template)
-    machine_conf = lkp.template_machine_conf(nodeset.instance_template)
+    machine_conf = lkp.nodeset_machine_conf(nodeset)
 
     # follow https://slurm.schedmd.com/slurm.conf.html#OPT_Boards
     # by setting Boards, SocketsPerBoard, CoresPerSocket, and ThreadsPerCore
@@ -184,15 +395,11 @@ def nodeset_lines(nodeset, lkp: util.Lookup) -> str:
     }
     nodelist = lkp.nodelist(nodeset)
 
-    return "\n".join(
-        map(
-            dict_to_conf,
-            [
-                {"NodeName": nodelist, "State": "CLOUD", **node_conf},
-                {"NodeSet": nodeset.nodeset_name, "Nodes": nodelist},
-            ],
-        )
-    )
+    lines = [{"NodeName": nodelist, "State": "CLOUD", **node_conf}]
+    # Every Slurm client parses these, thousands of NodeSet lines add ~20 s to each squeue.
+    if not cloud_param(lkp, "skip_nodeset_lines", False):
+        lines.append({"NodeSet": nodeset.nodeset_name, "Nodes": nodelist})
+    return "\n".join(map(dict_to_conf, lines))
 
 
 def nodeset_tpu_lines(nodeset, lkp: util.Lookup) -> str:
@@ -214,51 +421,6 @@ def nodeset_dyn_lines(nodeset):
         {"NodeSet": nodeset.nodeset_name, "Feature": nodeset.nodeset_feature}
     )
 
-
-def partitionlines(partition, lkp: util.Lookup) -> str:
-    """Make a partition line for the slurm.conf"""
-    MIN_MEM_PER_CPU = 100
-
-    def defmempercpu(nodeset_name: str) -> int:
-        nodeset = lkp.cfg.nodeset.get(nodeset_name)
-        template = nodeset.instance_template
-        machine = lkp.template_machine_conf(template)
-        mem_spec_limit = int(nodeset.node_conf.get("MemSpecLimit", 0))
-        return max(MIN_MEM_PER_CPU, (machine.memory - mem_spec_limit) // machine.cpus)
-
-    defmem = min(
-        map(defmempercpu, partition.partition_nodeset), default=MIN_MEM_PER_CPU
-    )
-
-    nodesets = list(
-        chain(
-            partition.partition_nodeset,
-            partition.partition_nodeset_dyn,
-            partition.partition_nodeset_tpu,
-        )
-    )
-
-    is_tpu = len(partition.partition_nodeset_tpu) > 0
-    is_dyn = len(partition.partition_nodeset_dyn) > 0
-
-    oversub_exlusive = partition.enable_job_exclusive or is_tpu
-    power_down_on_idle = partition.enable_job_exclusive and not is_dyn
-
-    line_elements = {
-        "PartitionName": partition.partition_name,
-        "Nodes": ",".join(nodesets),
-        "State": "UP",
-        "DefMemPerCPU": defmem,
-        "SuspendTime": 300,
-        "Oversubscribe": "Exclusive" if oversub_exlusive else None,
-        "PowerDownOnIdle": "YES" if power_down_on_idle else None,
-        **partition.partition_conf,
-    }
-    
-    if util.slurm_version_gte(lkp.slurm_version, "25.05") and lkp.cfg.nodeset:
-        line_elements["Topology"] = topology_type(lkp, partition) 
-
-    return dict_to_conf(line_elements)
 
 
 def suspend_exc_lines(lkp: util.Lookup) -> Iterable[str]:
@@ -286,25 +448,11 @@ def suspend_exc_lines(lkp: util.Lookup) -> Iterable[str]:
 
 
 def make_cloud_conf(lkp: util.Lookup) -> str:
-    """generate cloud.conf snippet"""
-    lines = [
-        FILE_PREAMBLE,
-        conflines(lkp),
-        *(nodeset_lines(n, lkp) for n in lkp.cfg.nodeset.values()),
-        *(nodeset_dyn_lines(n) for n in lkp.cfg.nodeset_dyn.values()),
-        *(nodeset_tpu_lines(n, lkp) for n in lkp.cfg.nodeset_tpu.values()),
-        *(partitionlines(p, lkp) for p in lkp.cfg.partitions.values()),
-        *(suspend_exc_lines(lkp)),
-    ]
-    return "\n\n".join(filter(None, lines))
+    return get_generator(lkp).make_cloud_conf()
 
 
 def gen_cloud_conf(lkp: util.Lookup) -> None:
-    content = make_cloud_conf(lkp)
-
-    conf_file = lkp.etc_dir / "cloud.conf"
-    conf_file.write_text(content)
-    util.chown_slurm(conf_file, mode=0o644)
+    get_generator(lkp).gen_cloud_conf()
 
 
 def install_slurm_conf(lkp: util.Lookup) -> None:
@@ -316,7 +464,7 @@ def install_slurm_conf(lkp: util.Lookup) -> None:
 
     conf_options = {
         "name": lkp.cfg.slurm_cluster_name,
-        "control_addr": lkp.control_addr if lkp.control_addr else lkp.hostname_fqdn,
+        "control_addr": lkp.control_addr or (lkp.control_host_addr if lkp.cfg.hybrid else lkp.hostname_fqdn),
         "control_host": lkp.control_host,
         "accounting_storage_host": lkp.control_addr if lkp.cfg.controller_network_attachment else lkp.control_host,
         "control_host_port": lkp.control_host_port,
@@ -326,6 +474,57 @@ def install_slurm_conf(lkp: util.Lookup) -> None:
         "mpi_default": mpi_default,
         "auth_key": "slurm" if lkp.cfg.enable_slurm_auth else "munge",
     }
+
+    # Resolve IPs for SlurmctldHost to ensure correct HA configuration (requires name(IP) format)
+    # and use multiple lines for Slurm 23.02+ syntax compliance if HA is enabled.
+    control_host = lkp.control_host
+    if lkp.cfg.get("enable_controller_load_balancer"):
+        control_ip = control_host
+    else:
+        try:
+            control_ip = socket.gethostbyname(control_host)
+        except Exception as e:
+            log.warning(f"Failed to resolve control_host {control_host}: {e}")
+            control_ip = lkp.control_addr if lkp.control_addr else control_host
+
+    slurmctld_hosts_str = f"SlurmctldHost={control_host}({control_ip})"
+
+    backup_name = lkp.cfg.get("slurm_backup_controller_name")
+    if backup_name:
+        backup_ip = lkp.cfg.get("slurm_backup_controller_ip")
+        if not backup_ip:
+            timeout = lkp.cfg.get("controller_startup_scripts_timeout", 300)
+            snooze = 10 # seconds
+            retries = int(timeout / snooze)
+            for i in range(retries):
+                try:
+                    backup_ip = socket.gethostbyname(backup_name)
+                    log.info(f"Successfully resolved backup_controller hostname '{backup_name}' to {backup_ip}")
+                    break
+                except Exception as e:
+                    if i < retries - 1:
+                        log.warning(f"Failed to resolve backup_controller hostname '{backup_name}' (Attempt {i + 1}/{retries}): {e}. Retrying in {snooze} seconds...")
+                        time.sleep(snooze)
+                    else:
+                        log.error(f"Failed to resolve backup_controller hostname '{backup_name}' after {retries} attempts: {e}")
+                        raise
+        else:
+            log.info(f"Using static backup_controller IP {backup_ip} from config")
+
+        slurmctld_hosts_str += f"\nSlurmctldHost={backup_name}({backup_ip})"
+
+    conf_options["slurmctld_hosts"] = slurmctld_hosts_str
+
+    # Append backup controller to AccountingStorageHost
+    if lkp.cfg.accounting_storage_backup_host:
+        conf_options["accounting_storage_backup_host"] = f"AccountingStorageBackupHost={lkp.cfg.accounting_storage_backup_host}"
+    elif backup_name:
+        # If DbdBackupHost is used, then slurmdbd runs on both.
+        backup_storage_host = backup_ip if lkp.cfg.controller_network_attachment else backup_name
+        conf_options["accounting_storage_backup_host"] = f"AccountingStorageBackupHost={backup_storage_host}"
+    else:
+        conf_options["accounting_storage_backup_host"] = ""
+
 
     conf = lkp.cfg.slurm_conf_tpl.format(**conf_options)
 
@@ -338,6 +537,7 @@ def install_slurmdbd_conf(lkp: util.Lookup) -> None:
     """install slurmdbd.conf"""
     conf_options = {
         "control_host": lkp.control_host,
+        "dbd_host_str": f"DbdHost={lkp.control_host}",
         "slurmlog": dirs.log,
         "state_save": slurmdirs.state,
         "db_name": "slurm_acct_db",
@@ -347,6 +547,14 @@ def install_slurmdbd_conf(lkp: util.Lookup) -> None:
         "db_port": "3306",
         "auth_key": "slurm" if lkp.cfg.enable_slurm_auth else "munge",
     }
+
+    # Configure DbdHost and DbdBackupHost
+    dbd_host_str = f"DbdHost={lkp.control_host}"
+    backup_name = lkp.cfg.get("slurm_backup_controller_name")
+    if backup_name:
+        dbd_host_str += f"\nDbdBackupHost={backup_name}"
+
+    conf_options["dbd_host_str"] = dbd_host_str
 
     if lkp.cfg.cloudsql_secret:
         secret_name = f"{lkp.cfg.slurm_cluster_name}-slurm-secret-cloudsql"
@@ -398,65 +606,12 @@ def install_jobsubmit_lua(lkp: util.Lookup) -> None:
     util.chown_slurm(conf_file, 0o600)
 
 
-def gen_cloud_gres_conf_lines(lkp: util.Lookup) -> str:
-    """generate cloud_gres.conf's content"""
-
-    use_gpu_type = util.slurm_version_gte(lkp.slurm_version, "25.05")
-
-    lines = []
-    if use_gpu_type:
-        gpu_nodes_with_type: defaultdict[Tuple[int, Optional[str]], List[str]] = defaultdict(list)
-        for nodeset in lkp.cfg.nodeset.values():
-            ti = lkp.template_info(nodeset.instance_template)
-            gpu_count = ti.gpu.count if ti.gpu  else 0
-            gpu_type = ti.gpu.type if ti.gpu  else None
-            if gpu_count:
-                key_with_type = (gpu_count, gpu_type)
-                gpu_nodes_with_type[key_with_type].append(lkp.nodelist(nodeset))
-        
-        for (gpu_count, gpu_type), names in gpu_nodes_with_type.items():
-            lines.append(dict_to_conf({
-                "NodeName": names,
-                "Name": "gpu",
-                "Type": gpu_type,
-                "File": f"/dev/nvidia[0-{gpu_count-1}]" if gpu_count > 1 else "/dev/nvidia0",
-            }))
-    else:
-        gpu_nodes_without_type: defaultdict[int, List[str]] = defaultdict(list)
-        for nodeset in lkp.cfg.nodeset.values():
-            ti = lkp.template_info(nodeset.instance_template)
-            gpu_count = ti.gpu.count if ti.gpu  else 0
-            # gpu_type is not used in this branch, but is needed for template_info to be consistent
-            gpu_type = ti.gpu.type if ti.gpu  else None 
-            if gpu_count:
-                key_without_type: int = gpu_count # Explicitly type key as int
-                gpu_nodes_without_type[key_without_type].append(lkp.nodelist(nodeset))
-        
-        for gpu_count, names in gpu_nodes_without_type.items():
-            lines.append(dict_to_conf({
-                "NodeName": names,
-                "Name": "gpu",
-                "File": f"/dev/nvidia[0-{gpu_count-1}]" if gpu_count > 1 else "/dev/nvidia0",
-            }))
-    
-    lines.append("\n")
-    return "\n".join(lines)
-
-
-def gen_cloud_gres_conf(lkp: util.Lookup) -> None:
-    """create cloud_gres.conf file"""
-
-    content = FILE_PREAMBLE + gen_cloud_gres_conf_lines(lkp)
-
-    conf_file = lkp.etc_dir / "cloud_gres.conf"
-    conf_file.write_text(content)
-    util.chown_slurm(conf_file, mode=0o600)
 
 
 def install_gres_conf(lkp: util.Lookup) -> None:
     conf_file = lkp.etc_dir / "cloud_gres.conf"
     gres_conf = lkp.etc_dir / "gres.conf"
-    if not gres_conf.exists():
+    if not (gres_conf.exists() or lkp.is_hybrid_setup):
         gres_conf.symlink_to(conf_file)
     util.chown_slurm(gres_conf, mode=0o600)
 
@@ -696,11 +851,21 @@ def _make_physical_path(physical_host: str) -> List[str]:
     short_path = parts[:2]
     return [_SLURM_TOPO_ROOT, *short_path]
 
+def _default_switch(nodeset: NSDict, lkp: util.Lookup) -> str:
+    """Leaf switch for nodes without a physicalHost."""
+    # topology/tree builds an O(switches^3) table in slurmctld and every slurmd on start,
+    # one switch per nodeset takes minutes with thousands of nodesets.
+    if cloud_param(lkp, "topology_region_switches", False) and not nodeset.accelerator_topology:
+        region = util.parse_self_link(nodeset.subnetwork or "").region
+        if region:
+            return f"region_{region}"
+    return f"ns_{nodeset.nodeset_name}"
+
 def add_nodeset_topology(
     nodeset: NSDict, bldr: TopologyBuilder|Any, lkp: util.Lookup
 ) -> None:
     up_nodes = set()
-    default_path = [_SLURM_TOPO_ROOT,  f"ns_{nodeset.nodeset_name}"]
+    default_path = [_SLURM_TOPO_ROOT, _default_switch(nodeset, lkp)]
 
     for inst in lkp.instances().values():
         try:
@@ -767,22 +932,8 @@ def install_topology_yaml(lkp: util.Lookup) -> None:
     summary_file = lkp.etc_dir / "cloud_topology.summary.json"
     topo_yaml = lkp.etc_dir / "topology.yaml"
 
-    if not topo_yaml.exists():
+    if not (topo_yaml.exists() or lkp.is_hybrid_setup):
         topo_yaml.symlink_to(yaml_file)
 
     util.chown_slurm(yaml_file, mode=0o644)
     util.chown_slurm(summary_file, mode=0o600)
-
-
-def generate_configs_slurm_v2505(lkp: util.Lookup) -> None:
-    install_slurm_conf(lkp)
-    install_slurmdbd_conf(lkp)
-    gen_cloud_conf(lkp)
-    gen_cloud_gres_conf(lkp)
-    install_gres_conf(lkp)
-    install_cgroup_conf(lkp)
-    install_jobsubmit_lua(lkp)
-    if lkp.cfg.nodeset:
-        _, summary = gen_topology_yaml(lkp)
-        summary.dump(lkp)
-        install_topology_yaml(lkp)

@@ -15,7 +15,7 @@ up a node.
 ### Example
 
 ```yaml
-- source: ./resources/scripts/wait-for-startup
+- source: community/modules/scripts/wait-for-startup
   kind: terraform
   id: wait
   settings:
@@ -43,7 +43,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | ~> 3.0 |
 
 ## Providers

@@ -58,6 +58,9 @@ variable "login_nodes" {
       device_name                         = optional(string)
       disk_size_gb                        = optional(number)
       disk_type                           = optional(string)
+      disk_storage_pool                   = optional(string)
+      disk_provisioned_iops               = optional(number)
+      disk_provisioned_throughput         = optional(number)
       disk_labels                         = optional(map(string), {})
       auto_delete                         = optional(bool, true)
       boot                                = optional(bool, false)
@@ -78,6 +81,7 @@ variable "login_nodes" {
         network_tier = string
       })), [])
       network            = optional(string)
+      network_attachment = optional(string)
       network_ip         = optional(string, "")
       nic_type           = optional(string)
       queue_count        = optional(number)
@@ -85,16 +89,19 @@ variable "login_nodes" {
       subnetwork         = optional(string)
       subnetwork_project = optional(string)
     })), [])
-    bandwidth_tier             = optional(string, "platform_default")
-    can_ip_forward             = optional(bool, false)
-    disk_auto_delete           = optional(bool, true)
-    disk_labels                = optional(map(string), {})
-    disk_resource_manager_tags = optional(map(string), {})
-    disk_size_gb               = optional(number)
-    disk_type                  = optional(string, "n1-standard-1")
-    enable_confidential_vm     = optional(bool, false)
-    enable_oslogin             = optional(bool, true)
-    enable_shielded_vm         = optional(bool, false)
+    bandwidth_tier              = optional(string, "platform_default")
+    can_ip_forward              = optional(bool, false)
+    disk_auto_delete            = optional(bool, true)
+    disk_labels                 = optional(map(string), {})
+    disk_resource_manager_tags  = optional(map(string), {})
+    disk_size_gb                = optional(number)
+    disk_type                   = optional(string, "n1-standard-1")
+    disk_storage_pool           = optional(string)
+    disk_provisioned_iops       = optional(number)
+    disk_provisioned_throughput = optional(number)
+    enable_confidential_vm      = optional(bool, false)
+    enable_oslogin              = optional(bool, true)
+    enable_shielded_vm          = optional(bool, false)
     gpu = optional(object({
       count = number
       type  = string
@@ -170,11 +177,13 @@ Storage to mounted on login instances
 - mount_options : Options to mount with.
 EOD
   type = list(object({
-    server_ip     = string
-    remote_mount  = string
-    local_mount   = string
-    fs_type       = string
-    mount_options = string
+    server_ip               = string
+    remote_mount            = string
+    local_mount             = string
+    local_mount_owner       = optional(string)
+    local_mount_permissions = optional(string)
+    fs_type                 = string
+    mount_options           = string
   }))
   default = []
 }

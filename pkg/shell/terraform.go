@@ -29,10 +29,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/terraform-exec/tfexec"
+	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/gocty"
 )
@@ -57,6 +60,51 @@ const (
 	AutomaticApply
 	PromptBeforeApply
 )
+
+var (
+	parallelismMu        sync.RWMutex
+	terraformParallelism int
+	warnedInvalidEnv     bool
+)
+
+// SetTerraformParallelism sets the global parallelism factor for Terraform operations
+func SetTerraformParallelism(p int) {
+	parallelismMu.Lock()
+	defer parallelismMu.Unlock()
+	terraformParallelism = p
+	warnedInvalidEnv = false
+}
+
+func getGlobalParallelism() int {
+	parallelismMu.RLock()
+	defer parallelismMu.RUnlock()
+	return terraformParallelism
+}
+
+// GetTerraformParallelism returns the parallelism factor to use.
+// If set via SetTerraformParallelism (> 0), it returns that value.
+// Otherwise, it checks GCLUSTER_TERRAFORM_PARALLELISM.
+// If unset, 0, or invalid, it returns 0 (which defaults to Terraform's built-in default of 10).
+func GetTerraformParallelism() int {
+	if p := getGlobalParallelism(); p > 0 {
+		return p
+	}
+	const env = "GCLUSTER_TERRAFORM_PARALLELISM"
+	if val := os.Getenv(env); val != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n < 0 {
+			parallelismMu.Lock()
+			if !warnedInvalidEnv {
+				logging.Warn("Ignoring invalid %s value %q: must be a non-negative integer", env, val)
+				warnedInvalidEnv = true
+			}
+			parallelismMu.Unlock()
+			return 0
+		}
+		return n
+	}
+	return 0
+}
 
 type outputValue struct {
 	Name      string
@@ -106,6 +154,12 @@ func initModule(tf *tfexec.Terraform) error {
 	}
 
 	if err != nil {
+		if strings.Contains(err.Error(), "git must be available") {
+			return config.HintError{
+				Hint: "Git is required to fetch remote modules. Please install git via your OS package manager (e.g., `apt install git` or `brew install git`).",
+				Err:  err,
+			}
+		}
 		return config.HintError{
 			Hint: fmt.Sprintf("initialization of deployment group %s failed; manually resolve errors", tf.WorkingDir()),
 			Err:  err}
@@ -186,13 +240,21 @@ func helpOnPlanError(msgs []JsonMessage) string {
 func planModule(tf *tfexec.Terraform, path string, destroy bool) (bool, error) {
 	outOpt := tfexec.Out(path)
 	var jsonOut strings.Builder
-	wantsChange, err := tf.PlanJSON(context.Background(), &jsonOut, outOpt, tfexec.Destroy(destroy))
+	planOpts := []tfexec.PlanOption{outOpt, tfexec.Destroy(destroy)}
+	if p := GetTerraformParallelism(); p > 0 {
+		planOpts = append(planOpts, tfexec.Parallelism(p))
+	}
+	wantsChange, err := tf.PlanJSON(context.Background(), &jsonOut, planOpts...)
 	if err != nil {
 		// Invoke `Plan` to get human-readable error.
 		// TODO: implement rendering to avoid double-call.
 		// Note planned deprecration of Plan in favor of JSON-only format
 		// https://github.com/hashicorp/terraform-exec/blob/1b7714111a94813e92936051fb3014fec81218d5/tfexec/plan.go#L128-L129
-		_, plainError := tf.Plan(context.Background(), tfexec.Destroy(destroy))
+		fallbackOpts := []tfexec.PlanOption{tfexec.Destroy(destroy)}
+		if p := GetTerraformParallelism(); p > 0 {
+			fallbackOpts = append(fallbackOpts, tfexec.Parallelism(p))
+		}
+		_, plainError := tf.Plan(context.Background(), fallbackOpts...)
 		if plainError == nil { // shouldn't happen
 			plainError = err // fallback to original error (simple `exit status 1`)
 		}
@@ -253,7 +315,11 @@ func applyPlanJsonOutput(tf *tfexec.Terraform, path string) error {
 		defer jsonFile.Close()
 		tf.SetStdout(newTimestampWriter(os.Stdout))
 		tf.SetStderr(newTimestampWriter(os.Stderr))
-		if err := tf.ApplyJSON(context.Background(), jsonFile, planFileOpt); err != nil {
+		applyOpts := []tfexec.ApplyOption{planFileOpt}
+		if p := GetTerraformParallelism(); p > 0 {
+			applyOpts = append(applyOpts, tfexec.Parallelism(p))
+		}
+		if err := tf.ApplyJSON(context.Background(), jsonFile, applyOpts...); err != nil {
 			return err
 		}
 		tf.SetStdout(nil)
@@ -267,7 +333,11 @@ func applyPlanConsoleOutput(tf *tfexec.Terraform, path string) error {
 	logging.Info("Running terraform apply on deployment group %s", tf.WorkingDir())
 	tf.SetStdout(newTimestampWriter(os.Stdout))
 	tf.SetStderr(newTimestampWriter(os.Stderr))
-	if err := tf.Apply(context.Background(), planFileOpt); err != nil {
+	applyOpts := []tfexec.ApplyOption{planFileOpt}
+	if p := GetTerraformParallelism(); p > 0 {
+		applyOpts = append(applyOpts, tfexec.Parallelism(p))
+	}
+	if err := tf.Apply(context.Background(), applyOpts...); err != nil {
 		return err
 	}
 	tf.SetStdout(nil)
@@ -501,4 +571,67 @@ func TfVersion() (string, error) {
 	}
 
 	return version.TerraformVersion, nil
+}
+
+// IsKubernetesUnreachableError returns true if the error indicates GKE is unreachable
+func IsKubernetesUnreachableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Convert to lowercase to ensure case-insensitive matching
+	msg := strings.ToLower(err.Error())
+
+	isKubernetesRelated := strings.Contains(msg, "kubernetes_") ||
+		strings.Contains(msg, "helm_") ||
+		strings.Contains(msg, "kubectl_")
+
+	isDialError := strings.Contains(msg, "dial tcp")
+
+	return (isDialError && isKubernetesRelated) ||
+		strings.Contains(msg, "kubernetes cluster unreachable") ||
+		strings.Contains(msg, "failed to create kubernetes rest client") ||
+		strings.Contains(msg, "no configuration has been provided, try setting kubernetes_master")
+}
+
+// TerraformCLI is an interface wrapping the required tfexec.Terraform methods for state manipulation.
+type TerraformCLI interface {
+	Show(ctx context.Context, opts ...tfexec.ShowOption) (*tfjson.State, error)
+	StateRm(ctx context.Context, address string, opts ...tfexec.StateRmCmdOption) error
+}
+
+// RemoveKubernetesResourcesFromState removes all kubernetes/helm/kubectl provider resources from the state
+func RemoveKubernetesResourcesFromState(tf TerraformCLI) error {
+	ctx := context.Background()
+	state, err := tf.Show(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to show state: %w", err)
+	}
+	if state == nil || state.Values == nil || state.Values.RootModule == nil {
+		return nil
+	}
+
+	resources := getResourcesRecursively(state.Values.RootModule)
+	for _, res := range resources {
+		if strings.HasPrefix(res.Type, "kubernetes_") ||
+			strings.HasPrefix(res.Type, "helm_") ||
+			strings.HasPrefix(res.Type, "kubectl_") {
+			logging.Info("GKE cluster unreachable: removing resource %s from state", res.Address)
+			if err := tf.StateRm(ctx, res.Address); err != nil {
+				logging.Error("failed to remove resource %s from state: %v", res.Address, err)
+			}
+		}
+	}
+	return nil
+}
+
+func getResourcesRecursively(module *tfjson.StateModule) []*tfjson.StateResource {
+	if module == nil {
+		return nil
+	}
+	var resources []*tfjson.StateResource
+	resources = append(resources, module.Resources...)
+	for _, child := range module.ChildModules {
+		resources = append(resources, getResourcesRecursively(child)...)
+	}
+	return resources
 }

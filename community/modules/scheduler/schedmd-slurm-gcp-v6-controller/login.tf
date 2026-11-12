@@ -26,7 +26,7 @@ locals {
 
 module "login" {
   source   = "../../internal/slurm-gcp/login"
-  for_each = { for x in var.login_nodes : x.group_name => x }
+  for_each = var.enable_hybrid ? {} : { for x in var.login_nodes : x.group_name => x }
 
   project_id = var.project_id
 
@@ -37,7 +37,7 @@ module "login" {
 
   login_nodes = each.value
 
-  startup_scripts         = local.login_startup_scripts
+  startup_scripts         = concat(local.login_startup_scripts, each.value.startup_script)
   startup_scripts_timeout = var.login_startup_scripts_timeout
 
   network_storage = var.login_network_storage
@@ -46,5 +46,5 @@ module "login" {
 
   # trigger replacement of login nodes when the controller instance is replaced
   # Needed for re-mounting volumes hosted on controller
-  replace_trigger = google_compute_instance_from_template.controller.self_link
+  replace_trigger = var.enable_hybrid ? null : (var.enable_backup_controller ? module.slurm_controller_template[0].self_link : one(google_compute_instance_from_template.controller[*].self_link))
 }

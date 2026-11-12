@@ -33,6 +33,12 @@ variable "enable_debug_logging" {
   default     = false
 }
 
+variable "enable_openmetrics" {
+  description = "Enable native Prometheus OpenMetrics telemetry via Slurm and Google Cloud Ops Agent"
+  type        = bool
+  default     = false
+}
+
 variable "extra_logging_flags" {
   type        = map(bool)
   description = "The only available flag is `trace_api`"
@@ -50,7 +56,7 @@ Enables slurm authentication instead of munge.
 
 EOD
   type        = bool
-  default     = false
+  default     = true
 }
 
 #########
@@ -65,6 +71,36 @@ variable "slurm_cluster_name" {
     condition     = can(regex("^[a-z]([-a-z0-9]{0,19})$", var.slurm_cluster_name))
     error_message = "Variable 'slurm_cluster_name' must be a match of regex '^[a-z]([-a-z0-9]{0,19})$'."
   }
+}
+
+variable "slurm_backup_controller_name" {
+  type        = string
+  description = "The backup controller name."
+  default     = null
+}
+
+variable "slurm_backup_controller_ip" {
+  type        = string
+  description = "The backup controller static IP."
+  default     = null
+}
+
+variable "enable_controller_load_balancer" {
+  type        = bool
+  description = "Whether an Internal Load Balancer is configured in front of the controllers."
+  default     = false
+}
+
+variable "accounting_storage_backup_host" {
+  type        = string
+  description = "The backup accounting storage host."
+  default     = null
+}
+
+variable "backup_controller_key_timeout" {
+  description = "The time in seconds for the backup controller to wait for the shared key to become available."
+  type        = number
+  default     = 300
 }
 
 variable "controller_state_disk" {
@@ -309,11 +345,13 @@ Storage to mounted on all instances.
 - mount_options : Options to mount with.
 EOD
   type = list(object({
-    server_ip     = string
-    remote_mount  = string
-    local_mount   = string
-    fs_type       = string
-    mount_options = string
+    server_ip               = string
+    remote_mount            = string
+    local_mount             = string
+    local_mount_owner       = optional(string)
+    local_mount_permissions = optional(string)
+    fs_type                 = string
+    mount_options           = string
   }))
   default = []
 }
@@ -339,23 +377,46 @@ variable "nodeset_tpu" {
 variable "cloud_parameters" {
   description = "cloud.conf options. Default behavior defined in scripts/conf.py"
   type = object({
-    no_comma_params         = optional(bool, false)
-    private_data            = optional(list(string))
-    scheduler_parameters    = optional(list(string))
-    resume_rate             = optional(number)
-    resume_timeout          = optional(number)
-    suspend_rate            = optional(number)
-    suspend_timeout         = optional(number)
-    slurmd_timeout          = optional(number)
-    unkillable_step_timeout = optional(number)
-    topology_plugin         = optional(string)
-    topology_param          = optional(string)
-    tree_width              = optional(number)
-    prolog_flags            = optional(string)
-    switch_type             = optional(string)
+    no_comma_params          = optional(bool, false)
+    private_data             = optional(list(string))
+    scheduler_parameters     = optional(list(string))
+    resume_rate              = optional(number)
+    resume_timeout           = optional(number)
+    suspend_rate             = optional(number)
+    suspend_timeout          = optional(number)
+    slurmd_timeout           = optional(number)
+    unkillable_step_timeout  = optional(number)
+    topology_plugin          = optional(string)
+    topology_param           = optional(string)
+    tree_width               = optional(number)
+    prolog_flags             = optional(string)
+    switch_type              = optional(string)
+    skip_nodeset_lines       = optional(bool, false)
+    topology_region_switches = optional(bool, false)
   })
   default  = {}
   nullable = false
+}
+
+variable "experimental" {
+  description = "Experimental Slurm settings. These features are subject to change and may be modified in future releases."
+  type = object({
+    enable_async_reply = optional(bool, false)
+  })
+  default  = {}
+  nullable = false
+}
+
+variable "enable_expedited_requeue" {
+  description = "Enables Expedited Requeue, which automatically requeues eligible jobs and grants them the highest priority upon node failure. (Usage: sbatch --requeue=expedite)"
+  type        = bool
+  default     = true
+}
+
+variable "enable_health_check_start_only" {
+  description = "Adjusts the Slurm HealthCheckNodeState behavior to run health checks solely upon node initialization. This prevents continuous health check polling."
+  type        = bool
+  default     = false
 }
 
 ##########
@@ -371,26 +432,6 @@ EOD
   default     = false
 }
 
-variable "google_app_cred_path" {
-  type        = string
-  description = "Path to Google Application Credentials."
-  default     = null
-}
-
-variable "slurm_bin_dir" {
-  type        = string
-  description = <<EOD
-Path to directory of Slurm binary commands (e.g. scontrol, sinfo). If 'null',
-then it will be assumed that binaries are in $PATH.
-EOD
-  default     = null
-}
-
-variable "slurm_log_dir" {
-  type        = string
-  description = "Directory where Slurm logs to."
-  default     = "/var/log/slurm"
-}
 
 variable "slurm_control_host" {
   type        = string
@@ -427,6 +468,28 @@ SlurmctldHost={var.slurm_control_host}\({var.slurm_control_addr}\)
 See https://slurm.schedmd.com/slurm.conf.html#OPT_SlurmctldHost
 EOD
   default     = null
+}
+
+variable "hybrid_conf" {
+  description = "The hybrid configuration"
+  type = object({
+    slurm_bin_dir           = optional(string)
+    slurm_log_dir           = optional(string)
+    slurm_control_host      = string
+    slurm_control_host_port = optional(string)
+    slurm_control_addr      = optional(string)
+    slurm_uid               = optional(number)
+    slurm_gid               = optional(number)
+    service_account_email   = optional(string)
+    google_app_cred_path    = optional(string)
+    slurm_version           = optional(string)
+  })
+  default = null
+
+  validation {
+    condition     = !var.enable_hybrid || var.hybrid_conf != null
+    error_message = "hybrid_conf must be set when enable_hybrid is true."
+  }
 }
 
 variable "output_dir" {
@@ -487,6 +550,13 @@ variable "slurm_key_mount" {
   default = null
 }
 
+variable "universe_domain" {
+  description = "Domain address for alternate API universe"
+  type        = string
+  default     = "googleapis.com"
+  nullable    = false
+}
+
 variable "endpoint_versions" {
   description = "Version of the API to use (The compute service is the only API currently supported)"
   type = object({
@@ -501,4 +571,8 @@ variable "controller_network_attachment" {
   description = "SelfLink for NetworkAttachment to be attached to the controller, if any."
   type        = string
   default     = null
+  validation {
+    condition     = var.controller_network_attachment == null || var.controller_network_attachment == "" || can(regex("^(?:https://www.googleapis.com/compute/[^/]+/)?projects/[^/]+/regions/[^/]+/networkAttachments/[^/]+$", var.controller_network_attachment))
+    error_message = "Variable 'controller_network_attachment' must be the full resource URI: projects/{project}/regions/{region}/networkAttachments/{name}."
+  }
 }

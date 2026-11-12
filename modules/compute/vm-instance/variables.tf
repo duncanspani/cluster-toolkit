@@ -30,7 +30,7 @@ variable "instance_image" {
   type        = map(string)
   default = {
     project = "cloud-hpc-image-public"
-    family  = "hpc-rocky-linux-8"
+    family  = "hpc-rocky-linux-9"
   }
 
   validation {
@@ -62,6 +62,24 @@ variable "auto_delete_boot_disk" {
   default     = true
 }
 
+variable "disk_storage_pool" {
+  description = "Storage pool to use for the boot disk. Note that storage pools are only supported with Hyperdisk types. For boot disks, only hyperdisk-balanced is supported. You must provide an existing storage pool, as this module does not create new ones."
+  type        = string
+  default     = null
+}
+
+variable "disk_provisioned_iops" {
+  description = "Indicates how many IOPS to provision for the boot disk. This sets the number of I/O operations per second that the disk can handle."
+  type        = number
+  default     = null
+}
+
+variable "disk_provisioned_throughput" {
+  description = "Indicates how much throughput to provision for the boot disk, in MB/s. This sets the amount of data that can be read or written from the disk per second."
+  type        = number
+  default     = null
+}
+
 variable "local_ssd_count" {
   description = "The number of local SSDs to attach to each VM. See https://cloud.google.com/compute/docs/disks/local-ssd."
   type        = number
@@ -75,13 +93,19 @@ variable "local_ssd_interface" {
 }
 
 variable "additional_persistent_disks" {
-  description = "Configurations of additional disks to be included on the partition nodes."
+  description = "Configurations of additional disks to be included on the partition nodes. Note that storage_pool is only supported with Hyperdisk types (balanced or throughput). You must provide an existing storage pool, as this module does not create new ones."
   type = object({
-    count = optional(number, 0)
-    type  = optional(string, "pd-balanced")
-    size  = optional(number, 200)
+    count                       = optional(number, 0)
+    type                        = optional(string, "pd-balanced")
+    size                        = optional(number, 200)
+    storage_pool                = optional(string)
+    disk_provisioned_iops       = optional(number)
+    disk_provisioned_throughput = optional(number)
+    provisioned_iops            = optional(number)
+    provisioned_throughput      = optional(number)
   })
-  default = {}
+  default  = {}
+  nullable = false
 }
 
 variable "name_prefix" {
@@ -141,13 +165,13 @@ variable "labels" {
 }
 
 variable "service_account_email" {
-  description = "Service account e-mail address to use with the node pool"
+  description = "Service account e-mail address to use with the VM instance."
   type        = string
   default     = null
 }
 
 variable "service_account_scopes" {
-  description = "Scopes to to use with the node pool."
+  description = "Scopes to use with the VM instance."
   type        = set(string)
   default     = ["https://www.googleapis.com/auth/cloud-platform"]
 }
@@ -203,6 +227,7 @@ variable "network_interfaces" {
     alias_ip_range     (list(object), optional)
     EOT
   type = list(object({
+    #If both network and subnetwork are specified, the subnetwork must belong to the provided network to avoid configuration errors.
     network            = string,
     subnetwork         = string,
     subnetwork_project = string,
@@ -225,12 +250,6 @@ variable "network_interfaces" {
     }))
   }))
   default = []
-  validation {
-    condition = alltrue([
-      for ni in var.network_interfaces : (ni.network == null) != (ni.subnetwork == null)
-    ])
-    error_message = "All additional network interfaces must define exactly one of \"network\" or \"subnetwork\"."
-  }
   validation {
     condition = alltrue([
       for ni in var.network_interfaces : ni.nic_type == null || contains(["GVNIC", "VIRTIO_NET", "MRDMA", "IRDMA", "IDPF"], ni.nic_type)

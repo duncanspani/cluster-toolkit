@@ -33,6 +33,8 @@ from django.dispatch import receiver
 from rest_framework.authtoken.models import Token
 from django import template
 
+from .cluster_manager.utils import new_state_namespace
+
 register = template.Library()
 
 logger = logging.getLogger(__name__)
@@ -67,12 +69,12 @@ def RESTRICT_IF_CLOUD_ACTIVE(
 # What else would I call it?
 def RFC1035Validator(maxLength, message):  # pylint: disable=invalid-name
     if not maxLength:
-        regex = re.compile("^[a-z][-a-z0-9]*[a-z0-9])$")
+        regex = re.compile("^[a-z]([-a-z0-9]*[a-z0-9])?$")
     elif maxLength < 2:
         raise ValueError("Max Length must be >= 2")
     # regex = re.compile(f'[a-z]([-a-z0-9]{{0,{maxLength-2}}}[a-z0-9])')
     else:
-        regex = f"^[a-z]([-a-z0-9]{{0,{maxLength-2}}}[a-z0-9])$"
+        regex = f"^[a-z]([-a-z0-9]{{0,{maxLength-2}}}[a-z0-9])?$"
     return RegexValidator(regex, message=message)
 
 
@@ -605,14 +607,14 @@ class Image(CloudResource):
         max_length=60,
         help_text="Enter a source image project",
         blank=False,
-        default="schedmd-slurm-public",
+        default="advanced-compute-images",
     )
 
     source_image_family = models.CharField(
         max_length=60,
         help_text="Enter a source image family",
         blank=False,
-        default="slurm-gcp-6-5-hpc-rocky-linux-8",
+        default="aci-cpu-rocky-linux-9-slurm-2605-amd64",
     )
 
     startup_script = models.ManyToManyField(
@@ -709,6 +711,14 @@ class Cluster(CloudResource):
         choices=CLUSTER_STATUS,
         default="n",
         help_text="Status of this cluster",
+    )
+    initialization_started = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "When the cluster last entered the initialising state. Used to "
+            "detect a bootstrap that has stalled with no error."
+        ),
     )
     spackdir = models.CharField(
         max_length=4096,
@@ -817,7 +827,7 @@ class Cluster(CloudResource):
         ),        
     )
     enable_slurm_auth = models.BooleanField(
-        default=False,
+        default=True,
         help_text=(
             "Enable Slurm native authentication instead of MUNGE."
         ),
@@ -1942,6 +1952,8 @@ class Workbench(CloudResource):
         ("r-latest-cpu-experimental-ubuntu-2004", "R (Experimental)"),
     )
     # pylint: enable=line-too-long
+    # Unused: Workbench Instances use the default image, so this is neither
+    # shown in the UI nor passed to Terraform. Kept to avoid a schema migration.
     image_family = models.CharField(
         max_length=64,
         choices=WORKBENCH_IMAGEFAMILIES,
@@ -1996,3 +2008,21 @@ class WorkbenchMountPoint(models.Model):
 
     def __str__(self):
         return f"{self.mount_path} on {self.workbench}"
+
+
+class StateNamespace(models.Model):
+    """This database's namespace in the Terraform state bucket (one row).
+
+    Created once per database so a fresh database cannot reuse an earlier
+    database's state prefixes.
+    """
+
+    namespace = models.CharField(max_length=32, unique=True, editable=False)
+    created = models.DateTimeField(auto_now_add=True)
+
+    @classmethod
+    def current(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1, defaults={"namespace": new_state_namespace()}
+        )
+        return obj.namespace

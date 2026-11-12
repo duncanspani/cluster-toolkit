@@ -1,0 +1,284 @@
+# GKE Upgrade Guide for Cluster Toolkit
+
+This guide provides comprehensive instructions for Cluster Toolkit users on how to manage and upgrade Google Kubernetes Engine (GKE) versions. It covers strategies for selecting appropriate versions, deploying new clusters with specific version requirements, and performing manual upgrades on existing clusters across various release channels. This guide helps you keep your GKE clusters secure, up-to-date, and stable for HPC and AI/ML workloads.
+
+## 1\. GKE Versioning and Release Channels
+
+Google Kubernetes Engine (GKE) regularly releases new versions containing new features, performance improvements, and security patches. GKE offers Release Channels to manage the balance between feature availability and stability.
+
+When planning an upgrade, you should review the official [GKE Release Notes](https://docs.cloud.google.com/kubernetes-engine/docs/release-notes) to understand the changes and identify the target version for your upgrade.
+
+## 2\. Cluster Upgrade Strategy
+
+Upgrade strategies differ depending on whether you are deploying a new cluster or updating an existing one. For new clusters, you can specify the target version or channel in the blueprint. For existing clusters, you perform a managed upgrade using `gcloud` commands.
+
+### 2.1 Deploying a New Cluster with a Specific Version
+
+When deploying a new cluster, you can configure your blueprint to use a specific GKE version or a release channel.
+
+#### Step 1: Identify Target Version
+
+Find the desired GKE version from the [GKE Release Notes](https://docs.cloud.google.com/kubernetes-engine/docs/release-notes). You should choose a version that is available in the channel you plan to use, or a version that meets your specific requirements (e.g., a specific patch for a bug fix). Note that versions available in the `RAPID` channel may not be available in `REGULAR` or `STABLE` yet.
+
+#### Step 2: Update Blueprint
+
+Modify your blueprint to specify the GKE version and release channel as shown below.
+
+##### Specifying GKE Versions in Blueprint
+
+In your Cluster Toolkit blueprint, you can control the GKE version via `version_prefix` var:  
+Blueprint snippet:
+
+```yaml
+# ...
+deployment_groups:
+- group: primary
+  modules:
+  - id: my-gke-cluster
+    source: modules/scheduler/gke-cluster
+    settings:
+      # Specify the GKE version here
+      # version_prefix: "1.35.6-gke.1641000"
+      # ...
+```
+
+**Note** on `version_prefix`: At initial cluster creation (when `min_master_version` is unset and `release_channel` is `UNSPECIFIED`, the default), `version_prefix` selects the newest GKE version matching that prefix (for example, `"1.35."` or `"1.35.2-gke.100"`). Because `gke-cluster` lists `min_master_version` in `lifecycle.ignore_changes` on the cluster resource (and `version` in `ignore_changes` on its system node pools), modifying `version_prefix` after the cluster is created **does not upgrade an existing control plane**—see [Section 2.2](#22-upgrading-an-existing-cluster) for upgrading existing clusters via `release_channel`, `gcloud`, or the Cloud Console.
+
+##### Specifying Release Channels in Blueprint
+
+GKE offers Release Channels (RAPID, REGULAR, STABLE) which can be configured in the `release_channel` variable.
+
+* **RAPID Channel**: Receives new features and versions first.  
+* **REGULAR Channel**: The default channel, balanced between stability and new features.  
+* **STABLE Channel**: Receives versions after they have been thoroughly soaked in other channels.
+
+Blueprint snippet:
+
+```yaml
+# ...
+deployment_groups:
+- group: primary
+  modules:
+  - id: my-gke-cluster
+    source: modules/scheduler/gke-cluster
+    settings:
+      release_channel: REGULAR
+```
+
+#### Step 3: Deploy the cluster
+
+Run `gcluster deploy` to create the cluster. Sample command:
+
+```shell
+./gcluster deploy <path-to-blueprint.yaml>
+```
+
+**Note**: For many machine types, deploy command would also have the deployment config file as well. Refer the respective READMEs of machine types in the toolkit for exact deployment commands.
+
+> [!TIP]
+> **Large-Scale Multi-Node-Pool Deployments (Terraform Concurrency)**:
+>
+> By default, [Terraform executes operations with an internal concurrency limit of 10](https://developer.hashicorp.com/terraform/internals/graph#walking-the-graph) (`-parallelism=10`). In large-scale GKE clusters containing many independent node pools (e.g. 50+ to 100+ node pools), this default forces node pool creation and deletion into sequential waves of 10, significantly increasing provisioning and teardown times.
+>
+> You can tune Terraform's concurrency level using either the CLI flag or an environment variable:
+>
+> * **CLI Flag:** Pass `--parallelism <N>` to `gcluster deploy` or `gcluster destroy`:
+>
+>   ```shell
+>   ./gcluster deploy <path-to-blueprint.yaml> --parallelism 80
+>   ./gcluster destroy <deployment-directory> --parallelism 80
+>   ```
+>
+> * **Environment Variable:** Set `GCLUSTER_TERRAFORM_PARALLELISM` in your shell or automated CI/CD pipeline:
+>
+>   ```shell
+>   export GCLUSTER_TERRAFORM_PARALLELISM=80
+>   ./gcluster deploy <path-to-blueprint.yaml>
+>   ```
+>
+> The `--parallelism` CLI flag takes precedence over the environment variable. When omitted or set to `0`, the toolkit preserves Terraform's default baseline of 10. Only non-negative integers (>= 0) are accepted.
+>
+> *Caution on API Quotas:* Setting parallelism higher than your GCP project's GKE concurrent operations quota can trigger `NO_CONCURRENT_OPERATION_QUOTA` errors. Ensure your project has sufficient concurrent operation quota when specifying high parallelism values.
+
+### 2.2 Upgrading an Existing Cluster
+
+To upgrade an existing cluster, you can perform a version upgrade to a specific target version or change the cluster's release channel to align with a different stability track. This section covers procedures for upgrading both the master control plane and individual node pools using **Cluster Toolkit blueprints**, the **`gcloud` CLI**, or the **Google Cloud Console (UI)**.
+
+> [!NOTE]
+> **How `version_prefix` vs. `release_channel` Interacts with Terraform State**:
+>
+> `gke-cluster` lists `min_master_version` in `lifecycle.ignore_changes` on the cluster (and `version` in `ignore_changes` on its in-module system node pools), so changing `version_prefix` does not upgrade an existing control plane (use `release_channel`, `gcloud`, or the Console). `gke-node-pool` does **not** ignore `version`: its `version` comes from the required `gke_version` input, normally wired via `use:` from the cluster's live master version, so after a control-plane upgrade the next `gcluster deploy` will plan an in-place node-pool version update. Pin `gke_version` on the node pool if you need to control that timing, and pass `--skip-gke-security-check` to `gcluster deploy` if you need to bypass the dynamic GKE version security vulnerability check during deployment.
+
+### Changing Release Channel via Blueprint
+
+You can update `release_channel` in your blueprint and redeploy:
+
+#### Step 1: Update Blueprint
+Modify your blueprint file to specify the target `release_channel` (and update `version_prefix` for any new clusters):
+
+```yaml
+    settings:
+      release_channel: REGULAR
+      version_prefix: "1.35." # Applied to newly created clusters
+```
+
+#### Step 2: Redeploy
+Run `gcluster deploy` pointing to your blueprint:
+
+```shell
+./gcluster deploy <path-to-blueprint.yaml> -w
+```
+
+### Upgrading via gcloud CLI
+
+This operation updates the GKE version of the control plane and node pools of the cluster via the gcloud CLI.
+
+#### Step 1: Identify Target Version
+
+Find the target version from the [GKE Release Notes](https://docs.cloud.google.com/kubernetes-engine/docs/release-notes).
+
+#### Step 2: Upgrade Master Control Plane
+
+The GKE control plane must be upgraded before the nodes can be upgraded. Use the `gcloud` command with the `--master` flag.
+
+```shell
+gcloud container clusters upgrade CLUSTER_NAME \
+    --master \
+    --cluster-version=TARGET_GKE_VERSION \
+    --region=REGION \
+    --project=PROJECT_ID
+```
+
+#### Step 3: Upgrade Node Pools
+
+Once the master is upgraded, upgrade each node pool (including system and compute pools) individually.
+
+```shell
+gcloud container clusters upgrade CLUSTER_NAME \
+    --node-pool=NODE_POOL_NAME \
+    --cluster-version=TARGET_GKE_VERSION \
+    --region=REGION \
+    --project=PROJECT_ID
+```
+
+#### Step 4: Verify Upgrade of Cluster and Node pool
+
+Check that the nodes are running the target version:
+
+* ##### Verify Cluster Version and Release Channel
+
+**Command:**
+
+```shell
+gcloud container clusters describe CLUSTER_NAME \
+    --region=REGION \
+    --format="yaml(currentMasterVersion, releaseChannel)" \
+    --project=PROJECT_ID
+```
+
+**Expected Output:**
+
+```yaml
+currentMasterVersion: TARGET_GKE_VERSION
+releaseChannel:
+  channel: REGULAR
+```
+
+* ##### Verify Node Pool Version
+
+**Command:**
+
+```shell
+gcloud container node-pools describe NODE_POOL_NAME \
+    --cluster=CLUSTER_NAME \
+    --region=REGION \
+    --format="yaml(version)" \
+    --project=PROJECT_ID
+```
+
+**Expected Output:**
+
+```yaml
+version: TARGET_GKE_VERSION
+```
+
+#### Changing Release Channel via gcloud CLI
+
+This command is typically used to move a cluster from the `RAPID` channel back to `REGULAR` or `STABLE` once the desired version becomes available in those channels, allowing you to resume automatic upgrades on a more conservative track.
+
+To change the release channel of an existing cluster, use the `gcloud container clusters update` command:
+
+```shell
+gcloud container clusters update CLUSTER_NAME \
+    --release-channel=CHANNEL \
+    --region=REGION
+```
+
+*Replace `CHANNEL` with `rapid`, `regular`, `stable`, or `none`.*
+
+### Upgrading via Google Cloud Console (UI)
+
+#### Step 1: Upgrade Control Plane
+
+1. Navigate to Clusters: In the Google Cloud Console, go to the **Kubernetes Engine \> Clusters** page.  
+2. Select Cluster: Click the name of the cluster you want to upgrade to open the cluster details.
+
+3. Edit Version: In the **Cluster basics** section, locate the **Version** field and click the edit icon or **Upgrade available** link.  
+4. Upgrade Control Plane: Select the option to upgrade the cluster control plane.  
+5. Save Changes: Select your target version and click **Save Changes** to start the upgrade.
+
+#### Step 2: Upgrade Node Pools
+
+1. After the control plane upgrade completes, click the **Nodes** tab on the cluster details page.
+2. Click the name of the node pool you want to upgrade.
+
+3. Click **Edit** at the top of the page.
+4. Click **Change** next to **Node version**, select the target version, and click **Save**.
+
+#### Changing Release Channel via Console (UI)
+
+1. Under **Cluster basics** on the cluster details page, find the **Release channel** field and click **Edit**.
+2. Select the new channel and click **Save Changes**.
+
+## 3\. Cluster Toolkit Team Updates
+
+Periodically, the Cluster Toolkit team updates the default `version_prefix` defined in `gke-cluster` and example blueprints to incorporate new stable GKE versions for **newly created** clusters:
+
+1. **New Clusters**: Updating Cluster Toolkit (download the latest release binary, or `git pull && make` in a source checkout) ensures newly created deployments pick up the latest default `version_prefix`.
+2. **Existing Clusters**: Because `gke-cluster` lists `min_master_version` in `lifecycle.ignore_changes`, re-running `./gcluster deploy <path-to-blueprint.yaml> -w` on an existing deployment will **not** upgrade an existing control plane's GKE version (though it will reconcile any `gke-node-pool` versions to match the cluster's current `master_version` if the control plane was already upgraded via release channel, `gcloud`, or the Cloud Console; see [Section 2.2](#22-upgrading-an-existing-cluster)).
+
+```shell
+./gcluster deploy <path-to-blueprint.yaml> -w
+```
+
+## 4\. Important Considerations During Upgrades
+
+When performing manual upgrades, following aspects need to be considered:
+
+* **Disruption and Reboots**:
+  * Upgrading GKE node pools requires node replacement or restarts. Whether triggered via blueprint redeployment, `gcloud` CLI, or the Cloud Console, upgrading a node pool initiates a rolling update. This process replaces old nodes with new ones running the updated version, which is disruptive as pods will be evicted and rescheduled.
+  * Standard rolling upgrades are disruptive to tightly-coupled distributed workloads (e.g., multi-node training jobs using `JobSet`). Losing a single node in a distributed job usually causes the entire job to fail. For these workloads, operators should gracefully pause or drain their jobs (e.g., scaling JobSets/deployments to 0) and verify that a successful checkpoint has been saved to persistent storage before initiating a node pool upgrade.
+* **Node Pool Label Updates (GCE Resource Labels)**:
+  * Applied to the underlying Compute Engine VM instances and disks (used for billing, organization tracking, and Toolkit metadata such as `ghpc_blueprint`). Updating GCE resource labels on a node pool forces GKE to initiate a **rolling recreation of all nodes** in the pool to apply the new GCE metadata, which is disruptive to running workloads. Because of this, Cluster Toolkit places `node_config[0].resource_labels` in `lifecycle.ignore_changes` to prevent inadvertent metadata updates (such as renaming a blueprint) from rolling production node pools.
+  * If GCE resource labels must be updated on an existing node pool, perform the update deliberately during a scheduled maintenance window using the `gcloud` CLI. Note that `--labels` **replaces the entire set** of resource labels on the node pool rather than merging with existing labels, which drops existing Cluster Toolkit labels (`ghpc_blueprint`, `ghpc_deployment`, `ghpc_module`, `ghpc_role`) if omitted. The documentation for `--labels` also explicitly warns: _"Updating this label will causes the node(s) to be recreated"_. Inspect the current labels first, then supply the complete combined label set:
+
+    ```shell
+    # 1. Inspect existing resource labels
+    gcloud container node-pools describe <pool-name> \
+      --cluster <cluster-name> \
+      --region <region> \
+      --format="value(config.resourceLabels)"
+
+    # 2. Update with the full set of existing and new labels
+    gcloud container node-pools update <pool-name> \
+      --cluster <cluster-name> \
+      --region <region> \
+      --labels ghpc_blueprint=<bp>,ghpc_deployment=<dep>,key1=val1,key2=val2
+    ```
+
+* **Pod Disruption Budgets (PDBs)**: GKE respects PDBs during upgrades. If a PDB is overly restrictive, it can block or slow down the upgrade process. Conversely, ensure PDBs are configured correctly to maintain application availability during the rolling update.  
+* **Storage Persistence**: Temporary storage volumes (like `emptyDir`) are deleted when nodes are replaced. Persistent disks (PVs) are unaffected.  
+* **Channel Changes**:  
+  * No Immediate Disruption: Changing the release channel is a metadata operation on the control plane and does not cause nodes to restart or be replaced, provided the current cluster version is valid in the new channel.  
+  * Version Compatibility: The cluster's current version must be supported in the target channel. You may need to upgrade the cluster first if it's on a version too old for the new channel.  
+* **Monitoring Upgrade Progress**: Monitor the upgrade progress to ensure nodes successfully transition to the new version. You can monitor the status in the Google Cloud Console under the GKE section.

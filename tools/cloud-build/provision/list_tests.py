@@ -18,14 +18,13 @@ List build files in `tools/cloud-build/daily-tests/builds/`
 and creates a cron-schedule-string for each of them.
 E.g.:
 ```
-$ ./list_tests.py | jq
+$ ./list_tests.py 30 510 | jq
 {
-  "batch-mpi": "30 0 * * *",
-  "chrome-remote-desktop": "48 0 * * *",
-  "cloud-batch": "6 1 * * *",
-  "hpc-high-io-v4": "24 1 * * *",
-  "hpc-high-io-v5": "42 1 * * *",
+  "batch-mpi": "15 7 * * MON-FRI",
+  "chrome-remote-desktop": "22 3 * * MON-FRI",
+  "cloud-batch": "30 3 * * MON-FRI",
 ...
+
 ```
 """
 
@@ -39,10 +38,7 @@ import itertools
 # not run on a nightly basis. Refer tools/cloud-build/provision/pr-ofe-test.tf
 # for the configuration.
 TO_SKIP = frozenset([
-    "ofe-deployment",
-    "ml-a3-ultragpu-slurm",
-    "gke-a3-ultragpu",
-    "ml-a3-ultragpu-jbvms"
+    "ofe-deployment"
 ])
 
 # Seed for deterministic order of tests, change to other value to shuffle tests
@@ -50,7 +46,7 @@ ORDER_SEED = b"What a wonderful phrase"
 
 
  # Test that shouldn't be scheduled too close to each other
-TEMPORAL_CONSTAINTS = [
+TEMPORAL_CONSTRAINTS = [
     # (set_of_tests, min_distance)
     ((
         "ml-a4-highgpu-onspot-slurm",
@@ -62,14 +58,8 @@ TEMPORAL_CONSTAINTS = [
         "gke-a3-ultragpu-onspot"
     ), 2*60),
     ((
-        "ml-a3-megagpu-slurm-ubuntu",
-        "gke-a3-megagpu",
         "ml-a3-megagpu-onspot-slurm-ubuntu",
         "gke-a3-megagpu-onspot"
-    ), 1*60),
-    ((
-        "ml-a3-highgpu-slurm",
-        "gke-a3-highgpu"
     ), 1*60),
     ((
         "ml-a3-highgpu-onspot-slurm",
@@ -78,7 +68,7 @@ TEMPORAL_CONSTAINTS = [
 ]
 # TODO:
 # * Consider defining constraints (e.g. reservations used) as a tags within tests yamls
-# * Use better solution than randome brute force
+# * Use better solution than random brute force
 
 def list_builds() -> list[str]:
     builds = [b[:-5] for b in glob.glob("*.yaml", root_dir="../daily-tests/builds/")]
@@ -98,16 +88,17 @@ def schedule_evenly(builds: list[str], start: int, end: int) -> dict[str, int]:
 
 
 def check_resource_constraints(schedule: dict[str, int]) -> bool:
-    for tests, min_distance in TEMPORAL_CONSTAINTS:
-        for a, b  in itertools.combinations(tests, 2):
+    for tests, min_distance in TEMPORAL_CONSTRAINTS:
+        active_tests = [t for t in tests if t in schedule]
+        for a, b in itertools.combinations(active_tests, 2):
             if abs(schedule[a] - schedule[b]) < min_distance:
                 return False
     return True
 
 
 def crontab(schedule: dict[str, int]) -> dict[str, str]:
-    return { # test: "{minutes} {hours} * * MON,TUE,THU,FRI"
-        k: f"{t % 60} {t // 60} * * MON,TUE,THU,FRI" for k, t in schedule.items()}
+    return { # test: "{minutes} {hours} * * MON-FRI"
+        k: f"{t % 60} {t // 60} * * MON-FRI" for k, t in schedule.items()}
 
 MAX_TRIES = 102000
 if __name__ == "__main__":

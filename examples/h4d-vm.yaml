@@ -25,6 +25,9 @@ vars:
   hostname_prefix: $(vars.deployment_name)-odyssey
   base_network_name: $(vars.deployment_name)
   reservation_name: "" # Optional: Set only if a reservation is available.
+  # Optional overrides (defaults shown)
+  # Number of H4D compute VMs.
+  compute_instance_count: 2
 
 # Documentation for each of the modules used below can be found at
 # https://github.com/GoogleCloudPlatform/hpc-toolkit/blob/main/modules/README.md
@@ -56,6 +59,7 @@ deployment_groups:
         subnet_region: $(vars.region)
         subnet_ip: $(vars.rdma_net_range)
         region: $(vars.region)
+      nic_type: "IRDMA"
 
   - id: homefs
     source: modules/file-system/filestore
@@ -82,36 +86,17 @@ deployment_groups:
     use: [h4d_startup, homefs]
     settings:
       machine_type: h4d-highmem-192-lssd
-      instance_count: 2
+      instance_count: $(vars.compute_instance_count)
       disk_type: hyperdisk-balanced
       on_host_maintenance: TERMINATE
       reservation_name: $(vars.reservation_name)
       network_interfaces:
         $(concat(
-          [{
-            network=null,
-            subnetwork=cluster-net-0.subnetwork_self_link,
-            subnetwork_project=vars.project_id,
-            nic_type="GVNIC",
-            queue_count=null,
-            network_ip=null,
-            stack_type=null,
-            access_config=[{nat_ip=null, public_ptr_domain_name=null, network_tier=null}],
-            ipv6_access_config=[],
-            alias_ip_range=[]
-          },
-          {
-            network=null,
-            subnetwork=cluster-rdma-net-0.subnetwork_self_link,
-            subnetwork_project=vars.project_id,
-            nic_type="IRDMA",
-            queue_count=null,
-            network_ip=null,
-            stack_type=null,
-            access_config=[],
-            ipv6_access_config=[],
-            alias_ip_range=[]
-          }]
+          [
+          merge(cluster-net-0.instance_additional_networks[0],
+          {access_config = [{ nat_ip = null, public_ptr_domain_name = null, network_tier = null }] })
+          ],
+          cluster-rdma-net-0.instance_additional_networks
         ))
 
   - id: wait-for-vms

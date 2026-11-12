@@ -58,7 +58,7 @@ gcloud compute instance-groups managed update-instances \
 This mode can be switched to proactive (automatic) replacement by setting
 [var.update_policy](#input_update_policy) to "PROACTIVE". In this case we
 recommend the use of Filestore to store the job queue state ("spool") and
-setting [var.spool_parent_dir][#input_spool_parent_dir] to its mount point:
+setting [var.spool_parent_dir](#input_spool_parent_dir) to its mount point:
 
 ```yaml
   - id: spoolfs
@@ -69,7 +69,7 @@ setting [var.spool_parent_dir][#input_spool_parent_dir] to its mount point:
       filestore_tier: ENTERPRISE
       local_mount: /shared
 
-...
+  # ...
 
   - id: htcondor_access
     source: community/modules/scheduler/htcondor-access-point
@@ -105,7 +105,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 3.83 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | >= 3.0 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.6 |
@@ -122,8 +122,8 @@ limitations under the License.
 
 | Name | Source | Version |
 | ---- | ------ | ------- |
-| <a name="module_access_point_instance_template"></a> [access\_point\_instance\_template](#module\_access\_point\_instance\_template) | terraform-google-modules/vm/google//modules/instance_template | ~> 12.1 |
-| <a name="module_htcondor_ap"></a> [htcondor\_ap](#module\_htcondor\_ap) | terraform-google-modules/vm/google//modules/mig | ~> 12.1 |
+| <a name="module_access_point_instance_template"></a> [access\_point\_instance\_template](#module\_access\_point\_instance\_template) | terraform-google-modules/vm/google//modules/instance_template | ~> 15.4 |
+| <a name="module_htcondor_ap"></a> [htcondor\_ap](#module\_htcondor\_ap) | terraform-google-modules/vm/google//modules/mig | ~> 15.4 |
 | <a name="module_startup_script"></a> [startup\_script](#module\_startup\_script) | ../../../../modules/scripts/startup-script | n/a |
 
 ## Resources

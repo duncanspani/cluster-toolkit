@@ -87,6 +87,48 @@ variable "bucket_dir" {
 # CONTROLLER: CLOUD # See variables_controller_instance.tf for the controller instance variables.
 #####################
 
+variable "enable_backup_controller" {
+  description = "Enables a secondary backup controller for High Availability."
+  type        = bool
+  default     = false
+  validation {
+    condition     = var.enable_backup_controller == false || (anytrue([for s in var.network_storage : s.local_mount == "/var/spool/slurm"]) && var.controller_state_disk == null && length(var.static_ips) >= 2 && var.cloudsql != null)
+    error_message = "When enable_backup_controller is true, controller_state_disk must be set to null, network_storage must contain a shared mount for '/var/spool/slurm' to sync state, at least 2 static_ips must be provided, and an external database (cloudsql) must be configured."
+  }
+}
+
+variable "controller_ha_type" {
+  type        = string
+  default     = "zonal"
+  description = "Type of Managed Instance Group for controllers: 'zonal' or 'regional'."
+  validation {
+    condition     = contains(["zonal", "regional"], var.controller_ha_type)
+    error_message = "The controller_ha_type must be either 'zonal' or 'regional'."
+  }
+}
+
+variable "backup_zone" {
+  description = "Zone for the backup controller. If null, it will be placed in the same region, potentially different zone."
+  type        = string
+  default     = null
+}
+
+variable "enable_controller_load_balancer" {
+  description = "Enables an Internal Load Balancer (ILB) in front of the controllers for stable Virtual IP and network-level failover."
+  type        = bool
+  default     = false
+  validation {
+    condition     = var.enable_controller_load_balancer == false || var.enable_backup_controller == true
+    error_message = "The Internal Load Balancer ('enable_controller_load_balancer') can only be enabled if High Availability ('enable_backup_controller') is enabled."
+  }
+}
+
+variable "controller_load_balancer_ip" {
+  description = "Optional static IP address to assign to the controller Internal Load Balancer (VIP). If null, one will be dynamically assigned from the subnetwork."
+  type        = string
+  default     = null
+}
+
 #########
 # LOGIN #
 #########
@@ -104,6 +146,9 @@ variable "login_nodes" {
       device_name                         = optional(string)
       disk_size_gb                        = optional(number)
       disk_type                           = optional(string)
+      disk_storage_pool                   = optional(string)
+      disk_provisioned_iops               = optional(number)
+      disk_provisioned_throughput         = optional(number)
       disk_labels                         = optional(map(string), {})
       auto_delete                         = optional(bool, true)
       boot                                = optional(bool, false)
@@ -124,6 +169,7 @@ variable "login_nodes" {
         network_tier = string
       })), [])
       network            = optional(string)
+      network_attachment = optional(string)
       network_ip         = optional(string, "")
       nic_type           = optional(string)
       queue_count        = optional(number)
@@ -131,16 +177,19 @@ variable "login_nodes" {
       subnetwork         = optional(string)
       subnetwork_project = optional(string)
     })), [])
-    bandwidth_tier             = optional(string, "platform_default")
-    can_ip_forward             = optional(bool, false)
-    disk_auto_delete           = optional(bool, true)
-    disk_labels                = optional(map(string), {})
-    disk_resource_manager_tags = optional(map(string), {})
-    disk_size_gb               = optional(number)
-    disk_type                  = optional(string, "n1-standard-1")
-    enable_confidential_vm     = optional(bool, false)
-    enable_oslogin             = optional(bool, true)
-    enable_shielded_vm         = optional(bool, false)
+    bandwidth_tier              = optional(string, "platform_default")
+    can_ip_forward              = optional(bool, false)
+    disk_auto_delete            = optional(bool, true)
+    disk_labels                 = optional(map(string), {})
+    disk_resource_manager_tags  = optional(map(string), {})
+    disk_size_gb                = optional(number)
+    disk_type                   = optional(string, "n1-standard-1")
+    disk_storage_pool           = optional(string)
+    disk_provisioned_iops       = optional(number)
+    disk_provisioned_throughput = optional(number)
+    enable_confidential_vm      = optional(bool, false)
+    enable_oslogin              = optional(bool, true)
+    enable_shielded_vm          = optional(bool, false)
     gpu = optional(object({
       count = number
       type  = string
@@ -182,11 +231,47 @@ variable "login_nodes" {
     termination_action                  = optional(string)
     disk_encryption_key                 = optional(string)
     disk_encryption_key_service_account = optional(string)
+    startup_script = optional(list(object({
+      filename = string
+      content  = string
+    })), [])
   }))
   default = []
   validation {
     condition     = length(distinct([for x in var.login_nodes : x.group_name])) == length(var.login_nodes)
     error_message = "All login_nodes must have a unique group name."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for ln in var.login_nodes : [
+        for nic in(ln.additional_networks != null ? ln.additional_networks : []) : (
+          # Cannot specify network or subnetwork alongside network_attachment
+          !(((nic.network != null && nic.network != "") || (nic.subnetwork != null && nic.subnetwork != "")) && (nic.network_attachment != null && nic.network_attachment != "")) &&
+          # Cannot specify subnetwork_project, access_config, ipv6_access_config, or alias_ip_range alongside network_attachment
+          (nic.network_attachment == null || nic.network_attachment == "" || (
+            (nic.subnetwork_project == null || nic.subnetwork_project == "") &&
+            length(try(nic.access_config, [])) == 0 &&
+            length(try(nic.ipv6_access_config, [])) == 0 &&
+            length(try(nic.alias_ip_range, [])) == 0
+          )) &&
+          # Must specify at least one of network, subnetwork, or network_attachment
+          ((nic.network != null && nic.network != "") || (nic.subnetwork != null && nic.subnetwork != "") || (nic.network_attachment != null && nic.network_attachment != ""))
+        )
+      ]
+    ]))
+    error_message = "In var.login_nodes[*].additional_networks, you must specify at least one of 'network', 'subnetwork', or 'network_attachment'. When 'network_attachment' is set, you cannot specify 'network', 'subnetwork', 'subnetwork_project', 'access_config', 'ipv6_access_config', or 'alias_ip_range'."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for ln in var.login_nodes : [
+        for nic in(ln.additional_networks != null ? ln.additional_networks : []) : (
+          nic.network_attachment == null || nic.network_attachment == "" || can(regex("^(?:https://www.googleapis.com/compute/[^/]+/)?projects/[^/]+/regions/[^/]+/networkAttachments/[^/]+$", nic.network_attachment))
+        )
+      ]
+    ]))
+    error_message = "In var.login_nodes[*].additional_networks, 'network_attachment' must be the full resource URI: projects/{project}/regions/{region}/networkAttachments/{name}."
   }
 }
 
@@ -202,14 +287,17 @@ variable "nodeset" {
     node_conf              = optional(map(string), {})
     nodeset_name           = string
     additional_disks = optional(list(object({
-      disk_name                  = optional(string)
-      device_name                = optional(string)
-      disk_size_gb               = optional(number)
-      disk_type                  = optional(string)
-      disk_labels                = optional(map(string), {})
-      auto_delete                = optional(bool, true)
-      boot                       = optional(bool, false)
-      disk_resource_manager_tags = optional(map(string), {})
+      disk_name                   = optional(string)
+      device_name                 = optional(string)
+      disk_size_gb                = optional(number)
+      disk_type                   = optional(string)
+      disk_storage_pool           = optional(string)
+      disk_provisioned_iops       = optional(number)
+      disk_provisioned_throughput = optional(number)
+      disk_labels                 = optional(map(string), {})
+      auto_delete                 = optional(bool, true)
+      boot                        = optional(bool, false)
+      disk_resource_manager_tags  = optional(map(string), {})
     })), [])
     bandwidth_tier                      = optional(string, "platform_default")
     can_ip_forward                      = optional(bool, false)
@@ -218,6 +306,9 @@ variable "nodeset" {
     disk_resource_manager_tags          = optional(map(string), {})
     disk_size_gb                        = optional(number)
     disk_type                           = optional(string)
+    disk_storage_pool                   = optional(string)
+    disk_provisioned_iops               = optional(number)
+    disk_provisioned_throughput         = optional(number)
     disk_encryption_key                 = optional(string)
     disk_encryption_key_service_account = optional(string)
     enable_confidential_vm              = optional(bool, false)
@@ -232,6 +323,9 @@ variable "nodeset" {
       count = number
       type  = string
     }))
+    # Resolved GPU count per VM, used to derive accelerator topology slice sizes.
+    # Declared explicitly so it is not dropped during object type conversion.
+    gpu_count            = optional(number)
     accelerator_topology = optional(string, null)
     dws_flex = object({
       enabled          = bool
@@ -239,8 +333,9 @@ variable "nodeset" {
       use_job_duration = bool
       use_bulk_insert  = bool
     })
-    labels       = optional(map(string), {})
-    machine_type = optional(string)
+    provisioning_engine = optional(string, "AUTO")
+    labels              = optional(map(string), {})
+    machine_type        = optional(string)
     advanced_machine_features = object({
       enable_nested_virtualization = optional(bool)
       threads_per_core             = optional(number)
@@ -255,13 +350,15 @@ variable "nodeset" {
     min_cpu_platform         = optional(string)
     network_tier             = optional(string, "STANDARD")
     network_storage = optional(list(object({
-      server_ip             = string
-      remote_mount          = string
-      local_mount           = string
-      fs_type               = string
-      mount_options         = string
-      client_install_runner = optional(map(string))
-      mount_runner          = optional(map(string))
+      server_ip               = string
+      remote_mount            = string
+      local_mount             = string
+      local_mount_owner       = optional(string)
+      local_mount_permissions = optional(string)
+      fs_type                 = string
+      mount_options           = string
+      client_install_runner   = optional(map(string))
+      mount_runner            = optional(map(string))
     })), [])
     on_host_maintenance   = optional(string)
     preemptible           = optional(bool, false)
@@ -281,25 +378,26 @@ variable "nodeset" {
     source_image         = optional(string)
     subnetwork_self_link = string
     additional_networks = optional(list(object({
-      network            = string
-      subnetwork         = string
-      subnetwork_project = string
-      network_ip         = string
-      nic_type           = string
-      stack_type         = string
-      queue_count        = number
-      access_config = list(object({
+      network            = optional(string)
+      subnetwork         = optional(string)
+      subnetwork_project = optional(string)
+      network_attachment = optional(string)
+      network_ip         = optional(string, "")
+      nic_type           = optional(string)
+      stack_type         = optional(string)
+      queue_count        = optional(number)
+      access_config = optional(list(object({
         nat_ip       = string
         network_tier = string
-      }))
-      ipv6_access_config = list(object({
+      })), [])
+      ipv6_access_config = optional(list(object({
         network_tier = string
-      }))
-      alias_ip_range = list(object({
+      })), [])
+      alias_ip_range = optional(list(object({
         ip_cidr_range         = string
         subnetwork_range_name = string
-      }))
-    })))
+      })), [])
+    })), [])
     access_config = optional(list(object({
       nat_ip       = string
       network_tier = string
@@ -316,8 +414,48 @@ variable "nodeset" {
     zone_target_shape = string
     zone_policy_allow = set(string)
     zone_policy_deny  = set(string)
+
+    instance_flexibility_policy = optional(object({
+      instance_selections = list(object({
+        name          = optional(string)
+        rank          = optional(number, 1)
+        machine_types = set(string)
+      }))
+    }))
   }))
   default = []
+
+  validation {
+    condition = alltrue(flatten([
+      for ns in var.nodeset : [
+        for nic in(ns.additional_networks != null ? ns.additional_networks : []) : (
+          # Cannot specify network or subnetwork alongside network_attachment
+          !(((nic.network != null && nic.network != "") || (nic.subnetwork != null && nic.subnetwork != "")) && (nic.network_attachment != null && nic.network_attachment != "")) &&
+          # Cannot specify subnetwork_project, access_config, ipv6_access_config, or alias_ip_range alongside network_attachment
+          (nic.network_attachment == null || nic.network_attachment == "" || (
+            (nic.subnetwork_project == null || nic.subnetwork_project == "") &&
+            length(try(nic.access_config, [])) == 0 &&
+            length(try(nic.ipv6_access_config, [])) == 0 &&
+            length(try(nic.alias_ip_range, [])) == 0
+          )) &&
+          # Must specify at least one of network, subnetwork, or network_attachment
+          ((nic.network != null && nic.network != "") || (nic.subnetwork != null && nic.subnetwork != "") || (nic.network_attachment != null && nic.network_attachment != ""))
+        )
+      ]
+    ]))
+    error_message = "In var.nodeset[*].additional_networks, you must specify at least one of 'network', 'subnetwork', or 'network_attachment'. When 'network_attachment' is set, you cannot specify 'network', 'subnetwork', 'subnetwork_project', 'access_config', 'ipv6_access_config', or 'alias_ip_range'."
+  }
+
+  validation {
+    condition = alltrue(flatten([
+      for ns in var.nodeset : [
+        for nic in(ns.additional_networks != null ? ns.additional_networks : []) : (
+          nic.network_attachment == null || nic.network_attachment == "" || can(regex("^(?:https://www.googleapis.com/compute/[^/]+/)?projects/[^/]+/regions/[^/]+/networkAttachments/[^/]+$", nic.network_attachment))
+        )
+      ]
+    ]))
+    error_message = "In var.nodeset[*].additional_networks, 'network_attachment' must be the full resource URI: projects/{project}/regions/{region}/networkAttachments/{name}."
+  }
 }
 
 variable "nodeset_tpu" {
@@ -342,13 +480,15 @@ variable "nodeset_tpu" {
     data_disks   = optional(list(string), [])
     docker_image = optional(string, "")
     network_storage = optional(list(object({
-      server_ip             = string
-      remote_mount          = string
-      local_mount           = string
-      fs_type               = string
-      mount_options         = string
-      client_install_runner = optional(map(string))
-      mount_runner          = optional(map(string))
+      server_ip               = string
+      remote_mount            = string
+      local_mount             = string
+      local_mount_owner       = optional(string)
+      local_mount_permissions = optional(string)
+      fs_type                 = string
+      mount_options           = string
+      client_install_runner   = optional(map(string))
+      mount_runner            = optional(map(string))
     })), [])
     subnetwork = string
     service_account = optional(object({
@@ -407,19 +547,57 @@ variable "controller_state_disk" {
   NOTE: This will not save the contents at /opt/apps and /home. To preserve those, they must be saved externally.
   EOD
   type = object({
-    type = string
-    size = number
+    type                        = string
+    size                        = number
+    storage_pool                = optional(string)
+    disk_provisioned_iops       = optional(number)
+    disk_provisioned_throughput = optional(number)
+    provisioned_iops            = optional(number)
+    provisioned_throughput      = optional(number)
   })
 
   default = {
     type = "pd-ssd"
     size = 50
   }
+
+  validation {
+    condition     = var.controller_state_disk == null || var.controller_state_disk.storage_pool == null || var.controller_state_disk.storage_pool == "" || contains(["hyperdisk-balanced", "hyperdisk-throughput"], lower(var.controller_state_disk.type))
+    error_message = "Storage pools are only supported with Hyperdisk types (balanced or throughput)."
+  }
+
+  validation {
+    condition     = var.controller_state_disk == null || (var.controller_state_disk.disk_provisioned_iops == null && var.controller_state_disk.provisioned_iops == null) || contains(["hyperdisk-balanced", "hyperdisk-extreme", "pd-extreme"], lower(var.controller_state_disk.type))
+    error_message = "disk_provisioned_iops is only supported with hyperdisk-balanced, hyperdisk-extreme, or pd-extreme disk types."
+  }
+
+  validation {
+    condition     = var.controller_state_disk == null || (var.controller_state_disk.disk_provisioned_throughput == null && var.controller_state_disk.provisioned_throughput == null) || contains(["hyperdisk-balanced", "hyperdisk-throughput", "hyperdisk-ml"], lower(var.controller_state_disk.type))
+    error_message = "disk_provisioned_throughput is only supported with hyperdisk-balanced, hyperdisk-throughput, or hyperdisk-ml disk types."
+  }
 }
+
+variable "slurm_control_host_port" {
+  type        = string
+  description = "The port number that the Slurm controller, slurmctld, listens to for work."
+  default     = "6818"
+
+  validation {
+    condition     = can(tonumber(var.slurm_control_host_port)) ? (tonumber(var.slurm_control_host_port) >= 1 && tonumber(var.slurm_control_host_port) <= 65535) : false
+    error_message = "The slurm_control_host_port must be a valid port number between 1 and 65535."
+  }
+}
+
 
 variable "enable_debug_logging" {
   type        = bool
   description = "Enables debug logging mode."
+  default     = false
+}
+
+variable "enable_openmetrics" {
+  description = "Enable native Prometheus OpenMetrics telemetry via Slurm and Google Cloud Ops Agent"
+  type        = bool
   default     = false
 }
 
@@ -457,29 +635,52 @@ Enables slurm authentication instead of munge.
 
 EOD
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "cloud_parameters" {
   description = "cloud.conf options. Defaults inherited from [Slurm GCP repo](https://github.com/GoogleCloudPlatform/slurm-gcp/blob/master/terraform/slurm_cluster/modules/slurm_files/README_TF.md#input_cloud_parameters)"
   type = object({
-    no_comma_params         = optional(bool, false)
-    private_data            = optional(list(string))
-    scheduler_parameters    = optional(list(string))
-    resume_rate             = optional(number)
-    resume_timeout          = optional(number)
-    suspend_rate            = optional(number)
-    suspend_timeout         = optional(number)
-    slurmd_timeout          = optional(number)
-    unkillable_step_timeout = optional(number)
-    topology_plugin         = optional(string)
-    topology_param          = optional(string)
-    tree_width              = optional(number)
-    prolog_flags            = optional(string)
-    switch_type             = optional(string)
+    no_comma_params          = optional(bool, false)
+    private_data             = optional(list(string))
+    scheduler_parameters     = optional(list(string))
+    resume_rate              = optional(number)
+    resume_timeout           = optional(number)
+    suspend_rate             = optional(number)
+    suspend_timeout          = optional(number)
+    slurmd_timeout           = optional(number)
+    unkillable_step_timeout  = optional(number)
+    topology_plugin          = optional(string)
+    topology_param           = optional(string)
+    tree_width               = optional(number)
+    prolog_flags             = optional(string)
+    switch_type              = optional(string)
+    skip_nodeset_lines       = optional(bool, false)
+    topology_region_switches = optional(bool, false)
   })
   default  = {}
   nullable = false
+}
+
+variable "experimental" {
+  description = "Experimental Slurm settings. These features are subject to change and may be modified in future releases."
+  type = object({
+    enable_async_reply = optional(bool, false)
+  })
+  default  = {}
+  nullable = false
+}
+
+variable "enable_expedited_requeue" {
+  description = "Enables Expedited Requeue, which automatically requeues eligible jobs and grants them the highest priority upon node failure. (Usage: sbatch --requeue=expedite)"
+  type        = bool
+  default     = true
+}
+
+variable "enable_health_check_start_only" {
+  description = "Adjusts the Slurm HealthCheckNodeState behavior to run health checks solely upon node initialization. This prevents continuous health check polling."
+  type        = bool
+  default     = false
 }
 
 variable "enable_default_mounts" {
@@ -489,19 +690,21 @@ variable "enable_default_mounts" {
     - /opt/apps
     EOD
   type        = bool
-  default     = true
+  default     = null
 }
 
 variable "network_storage" {
   description = "An array of network attached storage mounts to be configured on all instances."
   type = list(object({
-    server_ip             = string,
-    remote_mount          = string,
-    local_mount           = string,
-    fs_type               = string,
-    mount_options         = string,
-    client_install_runner = optional(map(string))
-    mount_runner          = optional(map(string))
+    server_ip               = string,
+    remote_mount            = string,
+    local_mount             = string,
+    local_mount_owner       = optional(string)
+    local_mount_permissions = optional(string)
+    fs_type                 = string,
+    mount_options           = string,
+    client_install_runner   = optional(map(string))
+    mount_runner            = optional(map(string))
   }))
   default = []
 }
@@ -509,11 +712,13 @@ variable "network_storage" {
 variable "login_network_storage" {
   description = "An array of network attached storage mounts to be configured on all login nodes."
   type = list(object({
-    server_ip     = string,
-    remote_mount  = string,
-    local_mount   = string,
-    fs_type       = string,
-    mount_options = string,
+    server_ip               = string,
+    remote_mount            = string,
+    local_mount             = string,
+    local_mount_owner       = optional(string)
+    local_mount_permissions = optional(string)
+    fs_type                 = string,
+    mount_options           = string,
   }))
   default = []
 }
@@ -759,6 +964,56 @@ variable "gcloud_path_override" {
   type        = string
   default     = ""
   nullable    = false
+}
+
+variable "enable_hybrid" {
+  description = <<EOD
+Enables use of hybrid controller mode. When true, controller_hybrid_config will
+be used instead of controller_instance_config and will disable login instances.
+EOD
+  type        = bool
+  default     = false
+}
+
+variable "hybrid_conf" {
+  description = "The hybrid configuration"
+  type = object({
+    slurm_bin_dir           = optional(string)
+    slurm_log_dir           = optional(string)
+    slurm_control_host      = string
+    slurm_control_host_port = optional(string)
+    slurm_control_addr      = optional(string)
+    slurm_uid               = optional(number)
+    slurm_gid               = optional(number)
+    service_account_email   = optional(string)
+    google_app_cred_path    = optional(string)
+    slurm_version           = optional(string)
+  })
+  default = null
+}
+
+variable "output_dir" {
+  type        = string
+  description = <<EOD
+Directory where this module will write its files to. These files include:
+cloud.conf; cloud_gres.conf; config.yaml; resume.py; suspend.py; and util.py.
+EOD
+  default     = null
+}
+
+variable "install_dir" {
+  type        = string
+  description = <<EOD
+Directory where the hybrid configuration directory will be installed on the
+on-premise controller (e.g. /etc/slurm/hybrid). This updates the prefix path
+for the resume and suspend scripts in the generated `cloud.conf` file.
+
+This variable should be used when the TerraformHost and the SlurmctldHost
+are different.
+
+This will default to var.output_dir if null.
+EOD
+  default     = null
 }
 
 # DEPRECATED VARIABLES

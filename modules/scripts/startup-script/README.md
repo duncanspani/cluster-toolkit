@@ -51,12 +51,12 @@ Each runner receives the following attributes:
 
 `ansible-local` runners require Ansible to be installed in the VM before
 running. To support other playbook runners in the Cluster Toolkit, we install
-version 2.11 of `ansible-core` as well as the larger package of collections
-found in `ansible` version 4.10.0.
+`ansible-core` (2.15.x) as well as the larger package of collections
+found in `ansible` version 8.7.0.
 
 If an `ansible-local` runner is found in the list supplied to this module,
 a script to install Ansible will be prepended to the list of runners. This
-behavior can be disabled by setting `var.prepend_ansible_installer` to `false`.
+behavior can be disabled by setting `install_ansible` to `false`.
 This script will do the following at VM startup:
 
 - Install system-wide python3 if not already installed using system package
@@ -82,7 +82,7 @@ binary in the virtual environment. This can be done by adding the following flag
 when calling `ansible-playbook`:
 
 ```shell
--e ansible_python_interpreter=/usr/local/ghpc-venv/bin/activate
+-e ansible_python_interpreter=/usr/local/ghpc-venv/bin/python3
 ```
 
 > **_NOTE:_** ansible-playbook and other ansible command line tools will only be
@@ -192,8 +192,9 @@ sudo bash add-google-cloud-ops-agent-repo.sh --also-install
 sudo service google-cloud-ops-agent start
 ```
 
-As a reminder, this should be in a startup script, which should run on all
-Compute nodes via the `compute_startup_script` on the controller.
+As a reminder, this should be in a `startup-script` module wired to your compute
+nodeset via `use:` (which automatically populates `startup_script` on the
+nodeset).
 
 #### Testing Installation
 
@@ -229,13 +230,7 @@ For official documentation see troubleshooting docs:
     runners:
       # Some modules such as filestore have runners as outputs for convenience:
       - $(homefs.install_nfs_client_runner)
-      # These runners can still be created manually:
-      # - type: shell
-      #   destination: "modules/filestore/scripts/install_nfs_client.sh"
-      #   source: "modules/filestore/scripts/install_nfs_client.sh"
-      - type: ansible-local
-        destination: "modules/filestore/scripts/mount.yaml"
-        source: "modules/filestore/scripts/mount.yaml"
+      - $(homefs.mount_runner)
       - type: data
         source: /tmp/foo.tgz
         destination: /tmp/bar.tgz
@@ -289,7 +284,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 6.41 |
 | <a name="requirement_local"></a> [local](#requirement\_local) | >= 2.0.0 |
 | <a name="requirement_random"></a> [random](#requirement\_random) | ~> 3.0 |
@@ -334,10 +329,10 @@ No modules.
 | <a name="input_http_no_proxy"></a> [http\_no\_proxy](#input\_http\_no\_proxy) | Domains for which to disable http\_proxy behavior. Honored only if var.http\_proxy is set | `string` | `".google.com,.googleapis.com,metadata.google.internal,localhost,127.0.0.1"` | no |
 | <a name="input_http_proxy"></a> [http\_proxy](#input\_http\_proxy) | Web (http and https) proxy configuration for pip, apt, and yum/dnf and interactive shells | `string` | `""` | no |
 | <a name="input_install_ansible"></a> [install\_ansible](#input\_install\_ansible) | Run Ansible installation script if either set to true or unset and runner of type 'ansible-local' are used. | `bool` | `null` | no |
-| <a name="input_install_cloud_ops_agent"></a> [install\_cloud\_ops\_agent](#input\_install\_cloud\_ops\_agent) | Warning: Consider using `install_stackdriver_agent` for better performance. Run Google Ops Agent installation script if set to true. | `bool` | `false` | no |
+| <a name="input_install_cloud_ops_agent"></a> [install\_cloud\_ops\_agent](#input\_install\_cloud\_ops\_agent) | Run Google Cloud Ops Agent installation script if set to true. Recommended for modern OSes (Rocky 9+, RHEL 9+, Ubuntu 24.04+, Debian 12+) where the legacy agent is unsupported. | `bool` | `false` | no |
 | <a name="input_install_cloud_rdma_drivers"></a> [install\_cloud\_rdma\_drivers](#input\_install\_cloud\_rdma\_drivers) | If true, will install and reload Cloud RDMA drivers. Currently only supported on Rocky Linux 8. Should not be enabled if using the HPC VM Image. | `bool` | `false` | no |
 | <a name="input_install_docker"></a> [install\_docker](#input\_install\_docker) | DEPRECATED: use var.docker. | `bool` | `null` | no |
-| <a name="input_install_stackdriver_agent"></a> [install\_stackdriver\_agent](#input\_install\_stackdriver\_agent) | Run Google Stackdriver Agent installation script if set to true. Preferred over ops agent for performance. | `bool` | `false` | no |
+| <a name="input_install_stackdriver_agent"></a> [install\_stackdriver\_agent](#input\_install\_stackdriver\_agent) | Run Google Stackdriver (legacy) Agent installation script if set to true. Note: This agent is deprecated and unsupported on newer OSes (Rocky 9+, RHEL 9+, Ubuntu 24.04+, Debian 12+). | `bool` | `false` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels for the created GCS bucket. Key-value pairs. | `map(string)` | n/a | yes |
 | <a name="input_local_ssd_filesystem"></a> [local\_ssd\_filesystem](#input\_local\_ssd\_filesystem) | Create and mount a filesystem from local SSD disks (data will be lost if VMs are powered down without enabling migration); enable by setting mountpoint field to a valid directory path. | <pre>object({<br/>    fs_type     = optional(string, "ext4")<br/>    mountpoint  = optional(string, "")<br/>    permissions = optional(string, "0755")<br/>  })</pre> | <pre>{<br/>  "fs_type": "ext4",<br/>  "mountpoint": "",<br/>  "permissions": "0755"<br/>}</pre> | no |
 | <a name="input_managed_lustre"></a> [managed\_lustre](#input\_managed\_lustre) | Configure Managed Lustre (assumes driver already installed) | <pre>object({<br/>    enabled = optional(bool, false)<br/>    port    = optional(number, 988)<br/>  })</pre> | <pre>{<br/>  "enabled": false,<br/>  "port": 988<br/>}</pre> | no |

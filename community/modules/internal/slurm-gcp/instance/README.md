@@ -10,9 +10,9 @@
 
 ## Overview
 
-This module creates a [compute instance](../../../../docs/glossary.md#vm) from
-[instance template](../../../../docs/glossary.md#instance-template) for a
-[Slurm cluster](../slurm_cluster/README.md).
+This module creates a compute instance from an
+[instance template](../instance_template/README.md) for a
+[Slurm cluster](../../../scheduler/schedmd-slurm-gcp-v6-controller/README.md).
 
 > **NOTE:** This module is only intended to be used by Slurm modules. For
 > general usage, please consider using:
@@ -23,8 +23,7 @@ This module creates a [compute instance](../../../../docs/glossary.md#vm) from
 
 ## Module API
 
-For the terraform module API reference, please see
-[README_TF.md](./README_TF.md).
+For the terraform module API reference, please see the [Inputs](#inputs) and [Outputs](#outputs) sections below.
 
 <!-- BEGINNING OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
 Copyright (C) SchedMD LLC.
@@ -46,7 +45,7 @@ limitations under the License.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | = 1.12.2 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.12.2 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | >= 3.43 |
 | <a name="requirement_null"></a> [null](#requirement\_null) | ~> 3.0 |
 
@@ -75,7 +74,7 @@ No modules.
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_access_config"></a> [access\_config](#input\_access\_config) | Access configurations, i.e. IPs via which the VM instance can be accessed via the Internet. | <pre>list(object({<br/>    nat_ip       = string<br/>    network_tier = string<br/>  }))</pre> | `[]` | no |
-| <a name="input_additional_networks"></a> [additional\_networks](#input\_additional\_networks) | Additional network interface details for GCE, if any. | <pre>list(object({<br/>    access_config = optional(list(object({<br/>      nat_ip       = string<br/>      network_tier = string<br/>    })), [])<br/>    alias_ip_range = optional(list(object({<br/>      ip_cidr_range         = string<br/>      subnetwork_range_name = string<br/>    })), [])<br/>    ipv6_access_config = optional(list(object({<br/>      network_tier = string<br/>    })), [])<br/>    network            = optional(string)<br/>    network_ip         = optional(string, "")<br/>    nic_type           = optional(string)<br/>    queue_count        = optional(number)<br/>    stack_type         = optional(string)<br/>    subnetwork         = optional(string)<br/>    subnetwork_project = optional(string)<br/>  }))</pre> | `[]` | no |
+| <a name="input_additional_networks"></a> [additional\_networks](#input\_additional\_networks) | Additional network interface details for GCE, if any. For Private Service Connect interfaces, 'network\_attachment' must be the full resource URI: projects/{project}/regions/{region}/networkAttachments/{name}. | <pre>list(object({<br/>    access_config = optional(list(object({<br/>      nat_ip       = string<br/>      network_tier = string<br/>    })), [])<br/>    alias_ip_range = optional(list(object({<br/>      ip_cidr_range         = string<br/>      subnetwork_range_name = string<br/>    })), [])<br/>    ipv6_access_config = optional(list(object({<br/>      network_tier = string<br/>    })), [])<br/>    network            = optional(string)<br/>    network_attachment = optional(string)<br/>    network_ip         = optional(string, "")<br/>    nic_type           = optional(string)<br/>    queue_count        = optional(number)<br/>    stack_type         = optional(string)<br/>    subnetwork         = optional(string)<br/>    subnetwork_project = optional(string)<br/>  }))</pre> | `[]` | no |
 | <a name="input_hostname"></a> [hostname](#input\_hostname) | Hostname of instances | `string` | n/a | yes |
 | <a name="input_instance_template"></a> [instance\_template](#input\_instance\_template) | Instance template self\_link used to create compute instances | `string` | n/a | yes |
 | <a name="input_network"></a> [network](#input\_network) | Network to deploy to. Only one of network or subnetwork should be specified. | `string` | `""` | no |

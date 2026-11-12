@@ -33,6 +33,9 @@ locals {
       source_image                        = var.source_image != "" ? format("${local.source_image_project}/${local.source_image}") : format("${local.source_image_project}/${local.source_image_family}")
       disk_size_gb                        = var.disk_size_gb
       disk_type                           = var.disk_type
+      disk_storage_pool                   = var.disk_storage_pool
+      disk_provisioned_iops               = var.disk_provisioned_iops
+      disk_provisioned_throughput         = var.disk_provisioned_throughput
       disk_labels                         = var.disk_labels
       auto_delete                         = var.auto_delete
       disk_resource_manager_tags          = var.disk_resource_manager_tags
@@ -99,19 +102,22 @@ resource "google_compute_instance_template" "tpl" {
   dynamic "disk" {
     for_each = local.all_disks
     content {
-      auto_delete           = lookup(disk.value, "auto_delete", null)
-      boot                  = lookup(disk.value, "boot", null)
-      device_name           = lookup(disk.value, "device_name", null)
-      disk_name             = lookup(disk.value, "disk_name", null)
-      disk_size_gb          = lookup(disk.value, "disk_size_gb", lookup(disk.value, "disk_type", null) == "local-ssd" ? "375" : null)
-      disk_type             = lookup(disk.value, "disk_type", null)
-      interface             = lookup(disk.value, "interface", lookup(disk.value, "disk_type", null) == "local-ssd" ? "NVME" : null)
-      mode                  = lookup(disk.value, "mode", null)
-      source                = lookup(disk.value, "source", null)
-      source_image          = lookup(disk.value, "source_image", null)
-      type                  = lookup(disk.value, "disk_type", null) == "local-ssd" ? "SCRATCH" : "PERSISTENT"
-      labels                = (lookup(disk.value, "source", null) != null || lookup(disk.value, "disk_type", null) == "local-ssd") ? null : lookup(disk.value, "disk_labels", null)
-      resource_manager_tags = lookup(disk.value, "disk_resource_manager_tags", {})
+      auto_delete            = lookup(disk.value, "auto_delete", null)
+      boot                   = lookup(disk.value, "boot", null)
+      device_name            = lookup(disk.value, "device_name", null)
+      disk_name              = lookup(disk.value, "disk_name", null)
+      disk_size_gb           = lookup(disk.value, "disk_size_gb", lookup(disk.value, "disk_type", null) == "local-ssd" ? "375" : null)
+      disk_type              = lookup(disk.value, "disk_type", null)
+      storage_pool           = try(disk.value.disk_storage_pool, null) == "" ? null : try(disk.value.disk_storage_pool, null)
+      provisioned_iops       = lookup(disk.value, "disk_provisioned_iops", null)
+      provisioned_throughput = lookup(disk.value, "disk_provisioned_throughput", null)
+      interface              = lookup(disk.value, "interface", lookup(disk.value, "disk_type", null) == "local-ssd" ? "NVME" : null)
+      mode                   = lookup(disk.value, "mode", null)
+      source                 = lookup(disk.value, "source", null)
+      source_image           = lookup(disk.value, "source_image", null)
+      type                   = lookup(disk.value, "disk_type", null) == "local-ssd" ? "SCRATCH" : "PERSISTENT"
+      labels                 = (lookup(disk.value, "source", null) != null || lookup(disk.value, "disk_type", null) == "local-ssd") ? null : lookup(disk.value, "disk_labels", null)
+      resource_manager_tags  = lookup(disk.value, "disk_resource_manager_tags", {})
 
       dynamic "disk_encryption_key" {
         for_each = lookup(disk.value, "disk_encryption_key", null) != null ? [lookup(disk.value, "disk_encryption_key", null)] : (var.disk_encryption_key != null ? [var.disk_encryption_key] : [])
@@ -155,12 +161,14 @@ resource "google_compute_instance_template" "tpl" {
   dynamic "network_interface" {
     for_each = var.additional_networks
     content {
-      network            = network_interface.value.network
-      subnetwork         = network_interface.value.subnetwork
-      subnetwork_project = network_interface.value.subnetwork_project
+      network            = try(coalesce(network_interface.value.network), null)
+      subnetwork         = try(coalesce(network_interface.value.subnetwork), null)
+      subnetwork_project = try(coalesce(network_interface.value.subnetwork_project), null)
       network_ip         = try(coalesce(network_interface.value.network_ip), null)
       nic_type           = try(coalesce(network_interface.value.nic_type), null)
       stack_type         = try(coalesce(network_interface.value.stack_type), null)
+      network_attachment = try(coalesce(network_interface.value.network_attachment), null)
+      queue_count        = network_interface.value.queue_count
       dynamic "access_config" {
         for_each = network_interface.value.access_config
         content {
@@ -203,6 +211,46 @@ resource "google_compute_instance_template" "tpl" {
       condition     = var.enable_confidential_vm ? contains(["SEV", "SEV_SNP", "TDX"], local.confidential_instance_type) : true
       error_message = "If enable_confidential_vm is true, confidential_instance_type must be one of 'SEV', 'SEV_SNP', or 'TDX'."
     }
+
+    precondition {
+      condition     = var.disk_storage_pool == null || var.disk_storage_pool == "" || can(regex("^hyperdisk-", lower(var.disk_type)))
+      error_message = "Storage pools are only supported with Hyperdisks. You must specify a valid hyperdisk disk_type."
+    }
+
+    precondition {
+      condition     = var.disk_type == null || !startswith(lower(var.disk_type), "hyperdisk-") || lower(var.disk_type) == "hyperdisk-balanced"
+      error_message = "When using Hyperdisks for boot disks, only hyperdisk-balanced is supported."
+    }
+
+    precondition {
+      condition     = var.disk_type == null || lower(var.disk_type) != "hyperdisk-balanced" || var.disk_size_gb == null || tonumber(var.disk_size_gb) >= 4
+      error_message = "The minimum capacity for hyperdisk-balanced is 4 GB."
+    }
+
+    precondition {
+      condition     = length(var.additional_disks) == 0 || alltrue([for disk in var.additional_disks : disk.disk_storage_pool == null || disk.disk_storage_pool == "" || contains(["hyperdisk-balanced", "hyperdisk-throughput"], lower(try(disk.disk_type, "")))])
+      error_message = "Storage pools are only supported with Hyperdisk types (balanced or throughput)."
+    }
+
+    precondition {
+      condition     = var.disk_provisioned_iops == null || (var.disk_type != null && contains(["hyperdisk-balanced", "pd-extreme"], lower(var.disk_type)))
+      error_message = "disk_provisioned_iops is only supported with hyperdisk-balanced or pd-extreme boot disks."
+    }
+
+    precondition {
+      condition     = var.disk_provisioned_throughput == null || (var.disk_type != null && lower(var.disk_type) == "hyperdisk-balanced")
+      error_message = "disk_provisioned_throughput is only supported with hyperdisk-balanced boot disks."
+    }
+
+    precondition {
+      condition     = length(var.additional_disks) == 0 || alltrue([for disk in var.additional_disks : try(disk.disk_provisioned_iops, null) == null || contains(["hyperdisk-balanced", "hyperdisk-extreme", "pd-extreme"], lower(try(disk.disk_type, "")))])
+      error_message = "disk_provisioned_iops in additional_disks is only supported with hyperdisk-balanced, hyperdisk-extreme, or pd-extreme disk types."
+    }
+
+    precondition {
+      condition     = length(var.additional_disks) == 0 || alltrue([for disk in var.additional_disks : try(disk.disk_provisioned_throughput, null) == null || contains(["hyperdisk-balanced", "hyperdisk-throughput", "hyperdisk-ml"], lower(try(disk.disk_type, "")))])
+      error_message = "disk_provisioned_throughput in additional_disks is only supported with hyperdisk-balanced, hyperdisk-throughput, or hyperdisk-ml disk types."
+    }
   }
 
   scheduling {
@@ -224,6 +272,13 @@ resource "google_compute_instance_template" "tpl" {
     for_each = var.reservation_affinity != null ? [var.reservation_affinity] : []
     content {
       type = reservation_affinity.value.type
+      dynamic "specific_reservation" {
+        for_each = try(reservation_affinity.value.specific_reservation, null) != null ? [reservation_affinity.value.specific_reservation] : []
+        content {
+          key    = specific_reservation.value.key
+          values = specific_reservation.value.values
+        }
+      }
     }
   }
 

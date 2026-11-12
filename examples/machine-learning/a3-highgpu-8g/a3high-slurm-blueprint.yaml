@@ -15,11 +15,17 @@
 blueprint_name: a3high-slurm
 
 vars:
-  # Set to true to enable the secure Slurm Native Authentication standard.
-  # Default fallback remains false (MUNGE) to guarantee zero regression risk on upgrades.
-  enable_slurm_auth: false
   sys_net_range: 172.16.0.0/16
-  filestore_ip_range: 192.168.0.0/29
+  # Managed-Lustre instance name. This should be unique for each deployment.
+  lustre_instance_id: $(vars.deployment_name)-lustre
+
+  # The values of size_gib and per_unit_storage_throughput are co-related
+  # Please refer https://cloud.google.com/managed-lustre/docs/create-instance#performance-tiers
+  # Storage capacity of the lustre instance in GiB
+  lustre_size_gib: 36000
+
+  # Maximum throughput of the lustre instance in MBps per TiB
+  per_unit_storage_throughput: 500
   source_image_project_id: ubuntu-os-cloud
   source_image_family: ubuntu-2204-lts
   local_mount_homefs: /home
@@ -29,11 +35,21 @@ vars:
   localssd_mountpoint: /mnt/localssd
   enable_nvidia_dcgm: true
   disk_size_gb: 200
-  build_slurm_from_git_ref: 6.12.1
+  build_slurm_from_git_ref: 6.13.2
   #Provisioning models (set to true or fill in reservation name, pick only one)
   a3_reservation_name: "" # supply reservation name
   a3_dws_flex_enabled: false
   a3_enable_spot_vm: false
+
+  # Optional overrides (defaults shown)
+  # Machine type of the temporary VM that builds the custom image.
+  image_build_machine_type: c2d-standard-32
+  # Maximum number of dynamically provisioned nodes in the a3 partition.
+  a3_node_count_dynamic_max: 0
+  # Machine type for the login node.
+  login_machine_type: c2-standard-4
+  # Machine type for the controller node.
+  controller_machine_type: c2-standard-8
 
 deployment_groups:
 - group: base
@@ -61,15 +77,22 @@ deployment_groups:
       network_count: 4
       subnetwork_cidr_suffix: 20
 
-  - id: homefs
-    source: modules/file-system/filestore
+  - id: private_service_access
+    source: modules/network/private-service-access
     use:
     - sysnet
+
+  - id: homefs
+    source: modules/file-system/managed-lustre
+    use:
+    - sysnet
+    - private_service_access
     settings:
-      filestore_tier: BASIC_SSD
-      size_gb: 2560
-      reserved_ip_range: $(vars.filestore_ip_range)
+      name: $(vars.lustre_instance_id)
+      size_gib: $(vars.lustre_size_gib)
       local_mount: $(vars.local_mount_homefs)
+      remote_mount: lustrefs
+      per_unit_storage_throughput: $(vars.per_unit_storage_throughput)
 
 - group: build-script
   modules:
@@ -191,10 +214,12 @@ deployment_groups:
               package_filename: /tmp/{{ package_url | basename }}
               nvidia_packages:
               - cuda-toolkit-12-8
-              - nvidia-dkms-570-server-open
-              - nvidia-driver-570-server-open
-              - datacenter-gpu-manager
-              - libnvidia-nscq-570
+              - nvidia-dkms-580-server-open
+              - nvidia-driver-580-server-open
+              - datacenter-gpu-manager-4-core=1:4.6.1-1
+              - datacenter-gpu-manager-4-dev=1:4.6.1-1
+              - datacenter-gpu-manager-4-cuda13=1:4.6.1-1
+              - libnvidia-nscq-580
               - nvidia-container-toolkit
             tasks:
             - name: Download NVIDIA repository package
@@ -207,12 +232,13 @@ deployment_groups:
                 state: present
             - name: Install NVIDIA Packages
               ansible.builtin.apt:
-                name: "{{ item }}"
-                update_cache: true
-              loop: "{{ nvidia_packages }}"
+                name: "{{ nvidia_packages }}"
+                update_cache: yes
+                allow_downgrade: yes
+
             - name: Freeze NVIDIA drivers and CUDA
               ansible.builtin.dpkg_selections:
-                name: "{{ item }}"
+                name: "{{ item.split('=')[0] }}"
                 selection: hold
               loop: "{{ nvidia_packages }}"
             - name: Create nvidia-persistenced override directory
@@ -301,8 +327,7 @@ deployment_groups:
             "monitoring_agent": "cloud-ops",
             "nvidia_version": "latest",
             "allow_kernel_upgrades": true, # tcpx kernel is held and gcp kernel is removed as the last task
-            "install_nvidia_repo": false,
-            "monitoring_agent": "cloud-ops",
+            "install_nvidia_repo": false
           }
 
       - type: shell
@@ -316,6 +341,29 @@ deployment_groups:
               -i localhost, --limit localhost --connection=local \
               -e @/var/tmp/slurm_vars.json \
               ansible/playbook.yml
+
+      - type: shell
+        destination: install_tcpx_lustre.sh
+        content: |
+          #!/bin/bash
+          set -e -o pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          curl -fsSL https://us-apt.pkg.dev/doc/repo-signing-key.gpg | gpg --yes --dearmor -o /usr/share/keyrings/lustre-client.gpg
+          echo "deb [signed-by=/usr/share/keyrings/lustre-client.gpg] https://us-apt.pkg.dev/projects/lustre-client-binaries lustre-client-ubuntu-jammy main" > /etc/apt/sources.list.d/artifact-registry.list
+          apt-get update
+          TCPX_KERNEL_VERSION=`(ls -d /lib/modules/*tcpx* 2>/dev/null || true) | sort -V | tail -n 1 | xargs -r basename`
+          if [ -n "${TCPX_KERNEL_VERSION}" ]; then
+            echo "Installing Lustre client modules for kernel ${TCPX_KERNEL_VERSION}..."
+            if ! apt-get install -y lustre-client-modules-${TCPX_KERNEL_VERSION}; then
+              echo "Pre-compiled package lustre-client-modules-${TCPX_KERNEL_VERSION} not found. Installing via DKMS for ${TCPX_KERNEL_VERSION}..."
+              apt-get install -y dkms linux-headers-${TCPX_KERNEL_VERSION} lustre-client-modules-dkms lustre-client-utils
+              echo "Building DKMS modules specifically for ${TCPX_KERNEL_VERSION}..."
+              dkms autoinstall -k "${TCPX_KERNEL_VERSION}"
+            fi
+          else
+            echo "ERROR: No tcpx kernel modules directory found under /lib/modules/." >&2
+            exit 1
+          fi
 
       - type: data
         destination: /etc/security/limits.d/99-unlimited.conf
@@ -450,7 +498,7 @@ deployment_groups:
     settings:
       # building this image does not require a GPU-enabled VM but must *not* be
       # run on a N-series VM otherwise, the "open" drivers will not install
-      machine_type: c2d-standard-32
+      machine_type: $(vars.image_build_machine_type)
       source_image_project_id: [$(vars.source_image_project_id)]
       source_image_family: $(vars.source_image_family)
       image_family: $(vars.instance_image.family)
@@ -566,8 +614,12 @@ deployment_groups:
       dws_flex:
         enabled: $(vars.a3_dws_flex_enabled)
       node_count_static: $(vars.a3_static_cluster_size)
-      node_count_dynamic_max: 0
+      node_count_dynamic_max: $(vars.a3_node_count_dynamic_max)
       disk_type: pd-ssd
+      # Hardware-locked: the multi-NIC RDMA/GPUDirect networking and accelerator
+      # settings in this blueprint are specific to this shape. To use a different
+      # accelerator or machine series, switch to the matching blueprint in examples/
+      # (run './gcluster explain' to find it) instead of changing machine_type here.
       machine_type: a3-highgpu-8g
       enable_public_ips: false
       advanced_machine_features:
@@ -632,7 +684,7 @@ deployment_groups:
     settings:
       name_prefix: login
       disk_type: pd-balanced
-      machine_type: c2-standard-4
+      machine_type: $(vars.login_machine_type)
       enable_login_public_ips: true
 
   - id: slurm_controller
@@ -650,7 +702,7 @@ deployment_groups:
         suspend_timeout: 600
         no_comma_params: false
         tree_width: $(vars.a3_static_cluster_size)
-      machine_type: c2-standard-8
+      machine_type: $(vars.controller_machine_type)
       disk_type: pd-balanced
       slurm_conf_tpl: ../_modules/embedded/community/modules/scheduler/schedmd-slurm-gcp-v6-controller/etc/long-prolog-slurm.conf.tpl
       enable_controller_public_ips: true

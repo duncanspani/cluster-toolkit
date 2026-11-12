@@ -34,7 +34,7 @@ log() {
 
 check_dependencies() {
 	log "INFO" "Checking for required command-line tools..."
-	local dependencies=("gcloud" "awk" "grep" "sort" "date" "sed" "basename")
+	local dependencies=("gcloud" "awk" "grep" "sort" "date" "sed" "basename" "python3")
 	local missing_deps=()
 
 	for cmd in "${dependencies[@]}"; do
@@ -86,6 +86,31 @@ load_exclusions() {
 	fi
 }
 
+populate_active_build_exclusions() {
+	log "INFO" "Fetching active Cloud Build builds to protect their service accounts..."
+
+	# --- Protect service accounts tied to ongoing Cloud Build builds ---
+	local ongoing_builds
+	local build_id
+	local prefix
+
+	if ! ongoing_builds=$(gcloud builds list --project="$PROJECT_ID" --filter="status=(QUEUED,WORKING)" --format="value(id)" 2>/dev/null); then
+		log "WARNING" "Failed to list ongoing Cloud Build builds. Service accounts for in-flight builds may not be protected."
+	elif [[ -z "$ongoing_builds" ]]; then
+		log "INFO" "No ongoing Cloud Build builds found."
+	else
+		while IFS= read -r build_id; do
+			[[ -z "$build_id" ]] && continue
+			prefix="${build_id:0:6}"
+			if [[ -n "$prefix" && -z "${EXCLUSION_MAP[${prefix}]:-}" ]]; then
+				log "INFO" "Protecting service accounts matching active Cloud Build prefix: ${prefix} (build ${build_id})"
+				EXCLUSION_MAP["${prefix}"]=1
+			fi
+		done <<<"$ongoing_builds"
+	fi
+
+	log "INFO" "Finished fetching active build prefixes."
+}
 # Checks if a resource should be excluded from deletion.
 # Returns 0 if EXCLUDED (DO NOT delete)
 # Returns 1 if NOT excluded (OK to delete)
@@ -713,17 +738,32 @@ process_addresses() {
 	local global_addresses
 	if ! global_addresses=$(gcloud compute addresses list --project="$PROJECT_ID" \
 		--filter="creationTimestamp < '$CUTOFF_TIME' AND NOT region:*" \
-		--format="value(name, status, labels.map())" | sort); then
+		--format="value(name, status, network.basename(), purpose, labels.map())" | sort); then
 		log "ERROR" "Failed to list Global Addresses."
 		((ERROR_COUNT++)) || true
 	else
-		while IFS=$'\t' read -r name status labels_str; do
+		while IFS=$'\t' read -r name status network_name purpose labels_str; do
 			[[ -z "$name" ]] && continue
 			if ! is_excluded "$name" "${labels_str:-}"; then
 				if [[ "$status" == "IN_USE" ]]; then
 					log "SKIP" "Skipping IN_USE Global Address $name."
 					continue
 				fi
+
+				# If it is a VPC peering address, try to clean up the peering first
+				if [[ "$purpose" == "VPC_PEERING" && -n "$network_name" ]]; then
+					# If the network does NOT exist, the peering is dangling and we must delete it.
+					# (If the network exists, it will be cleaned up in Phase 4 which also deletes its peering).
+					if ! gcloud compute networks describe "$network_name" --project="$PROJECT_ID" >/dev/null 2>&1; then
+						log "INFO" "Detected dangling PSA address $name for deleted network $network_name. Cleaning up peering..."
+						gcloud services vpc-peerings delete \
+							--service=servicenetworking.googleapis.com \
+							--network="$network_name" \
+							--project="$PROJECT_ID" \
+							--quiet >/dev/null 2>&1 || true
+					fi
+				fi
+
 				execute_delete "Global Address" "$name" "(Global)" \
 					gcloud compute addresses delete "$name" --project="$PROJECT_ID" --global --quiet
 			fi
@@ -735,7 +775,7 @@ process_iam_deleted_members() {
 	log "INFO" "--- Processing: IAM Role Bindings for Deleted Service Accounts (Bulk) ---"
 
 	# Run the python bulk script inline
-	if ! python3 - "$PROJECT_ID" "$DRY_RUN" <<'EOF'; then
+	if ! python3 - "$PROJECT_ID" "$DRY_RUN" <<'EOF'
 import json, os, subprocess, sys, tempfile
 
 project_id = sys.argv[1]
@@ -809,6 +849,7 @@ except Exception as e:
     print(f"ERROR: An unexpected error occurred: {e}")
     sys.exit(1)
 EOF
+	then
 		log "ERROR" "Bulk IAM cleanup failed."
 		((ERROR_COUNT++)) || true
 	else
@@ -836,7 +877,7 @@ process_service_accounts() {
 		local username="${email%%@*}"
 
 		# Safety filter: only process service accounts matching integration test patterns
-		if [[ "$username" != *-compute && "$username" != *-controller && "$username" != *-login && "$username" != *-sa && "$username" != dummy-* && "$username" != test-* ]]; then
+		if [[ "$username" != *-compute && "$username" != *-compute2 && "$username" != *-controller && "$username" != *-ctrl && "$username" != *-login && "$username" != *-builder && "$username" != *-tpu && "$username" != *-sa && "$username" != dummy-* && "$username" != test-* ]]; then
 			log "SKIP" "Service Account $email does not match known test patterns. Skipping to prevent accidental deletion."
 			continue
 		fi
@@ -868,6 +909,57 @@ process_service_accounts() {
 		fi
 	done <<<"$sas_data"
 	log "INFO" "Finished processing Service Accounts. $count service accounts actioned."
+}
+
+process_custom_roles() {
+	log "INFO" "--- Processing: Custom IAM Roles ---"
+	local roles_data
+	if ! roles_data=$(gcloud iam roles list --project="$PROJECT_ID" --format="value(name,description)"); then
+		log "ERROR" "Failed to list custom IAM roles."
+		((ERROR_COUNT++)) || true
+		return 0
+	fi
+	if [[ -z "$roles_data" ]]; then
+		log "INFO" "No custom IAM roles found."
+		return 0
+	fi
+
+	local count=0
+	while IFS=$'\t' read -r name description; do
+		[[ -z "$name" ]] && continue
+
+		local role_id="${name##*/}"
+
+		# Safety filter: only roles generated by community/modules/iam/service-account-profiles,
+		# whose id is <deployment_name>.<name>[.<role_id_suffix>][.scoped] (dashes as underscores)
+		# and whose description the module sets.
+		if [[ ! "$role_id" =~ ^[a-z0-9_]+(\.[a-z0-9_]+){1,3}$ ]] ||
+			[[ "$description" != "Least-privilege permissions for "* && "$description" != "Custom least-privilege permissions: "* ]]; then
+			log "SKIP" "Custom role $role_id was not generated by service-account-profiles. Skipping to prevent accidental deletion."
+			continue
+		fi
+
+		local protected=false
+		if [[ -n "${EXCLUSION_MAP[${role_id}]:-}" ]]; then
+			protected=true
+		else
+			for protected_name in "${!EXCLUSION_MAP[@]}"; do
+				# Role ids carry the deployment name with dashes replaced by underscores.
+				if [[ "$role_id" == *"${protected_name//-/_}"* ]]; then
+					protected=true
+					log "DEBUG" "Custom role $role_id is protected because it contains protected resource name: $protected_name"
+					break
+				fi
+			done
+		fi
+
+		if [[ "$protected" == "false" ]]; then
+			execute_delete "Custom IAM Role" "$role_id" "" \
+				gcloud iam roles delete "$role_id" --project="$PROJECT_ID" --quiet
+			((count++)) || true
+		fi
+	done <<<"$roles_data"
+	log "INFO" "Finished processing custom IAM roles. $count custom roles actioned."
 }
 
 process_vm_images() {
@@ -1155,6 +1247,18 @@ process_networks() {
 	local count=0
 	while IFS=$'\t' read -r name self_link; do
 		[[ -z "$name" || "$name" == "default" || $(is_excluded "$name") ]] && continue
+
+		# Delete Service Networking connections (Private Service Access vpc peerings)
+		# We check if a peering exists first to avoid false-alarm error counts.
+		if gcloud compute networks describe "$name" --project="$PROJECT_ID" --format="value(peerings[].name)" 2>/dev/null | grep -q "servicenetworking-googleapis-com"; then
+			execute_delete "Service Networking Connection" "servicenetworking.googleapis.com" "on network $name" \
+				gcloud services vpc-peerings delete \
+				--service=servicenetworking.googleapis.com \
+				--network="$name" \
+				--project="$PROJECT_ID" \
+				--quiet
+		fi
+
 		gcloud compute routes list --project="$PROJECT_ID" --filter="network=\"$self_link\"" --format="value(name)" 2>/dev/null | while IFS= read -r r; do
 			if [[ -n "$r" ]] && ! is_excluded "$r"; then
 				execute_delete "Dependent Route" "$r" "" \
@@ -1271,7 +1375,9 @@ main() {
 
 	# --- Phase 5: IAM Cleanup ---
 	log "INFO" "--- PHASE 5: Cleaning up IAM Policy Bindings ---"
+	populate_active_build_exclusions
 	process_service_accounts
+	process_custom_roles
 	process_iam_deleted_members
 
 	log "INFO" "CLEANUP RUN FINISHED for project: $PROJECT_ID"
